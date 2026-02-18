@@ -113,7 +113,7 @@ public class Message implements Serializable
         return payloadLen;
     }
 
-    public byte[] payload()
+    public byte[] getPayload()
     {
         return payload;
     }

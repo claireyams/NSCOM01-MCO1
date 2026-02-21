@@ -55,6 +55,10 @@ public class Client
                     System.out.println("[CLIENT] Received SYN_ACK");
 
                     sequenceNum++;
+                    Message ack = new Message(Message.ACK, sequenceNum);
+                    sendMessage(ack);
+                    System.out.println("[CLIENT] Message[Type = ACK, Sequence Number = " + sequenceNum + "]");
+
                     expectedAckNum = sequenceNum;
                     state = ClientState.ESTABLISHED;
 
@@ -127,6 +131,29 @@ public class Client
         throw new IOException("Failed to send message after " + MAX_RETRIES + " retries");
     }
 
+    private void writeChunksToFile(List<byte[]> chunks, String filename) throws IOException
+    {
+        FileOutputStream fos = null;
+
+        try 
+        {
+            fos = new FileOutputStream(filename);
+            
+            for(int i = 0; i < chunks.size(); i++)
+            {
+                byte[] chunk = chunks.get(i);
+                fos.write(chunk);
+            }
+        }
+        finally
+        {
+            if(fos != null)
+            {
+                fos.close();
+            }
+        }
+    }
+
     public boolean downloadFile(String remoteFilename, String localFilename) throws IOException
     {
         if(state != ClientState.ESTABLISHED)
@@ -136,8 +163,8 @@ public class Client
         }
 
         System.out.println("===== Starting File Download =====");
-        System.out.println("Remote filename: " + remoteFilename);
-        System.out.println("Local filename: " + localFilename);
+        System.out.println("Remote filename (source): " + remoteFilename);
+        System.out.println("Local filename (destination): " + localFilename);
 
         // send read request to server
         byte[] filenameInBytes = remoteFilename.getBytes();
@@ -214,13 +241,85 @@ public class Client
 
         if(complete)
         {
-            // to do: write received chunks to file
+            writeChunksToFile(receivedChunks, localFilename);
             System.out.println("File Downloaded Successfully at filename '" + localFilename + "'");
             System.out.println("Total packet received: " + receivedChunks.size());
             return true;
         }
 
         return false; 
+    }
+
+    public boolean uploadFile(String localFilename, String remoteFilename) throws IOException
+    {
+        if(state != ClientState.ESTABLISHED)
+        {
+            System.out.println("Cannot upload file. Connection is not established");
+            return false;
+        }
+
+        System.out.println("===== Starting File Upload =====");
+        System.out.println("Local filename (source): " + localFilename);
+        System.out.println("Remote filename (destination): " + remoteFilename);
+
+        File file = new File(localFilename);
+        if(!file.exists())
+        {
+            System.out.println("Error: File not found.");
+            return false;
+        }
+
+        Message filename = new Message(Message.DATA, sequenceNum, remoteFilename.getBytes());
+        sendMessage(filename);
+        System.out.println("Filename sent: Sequence Number = " + sequenceNum);
+
+        waitAck(sequenceNum);
+        sequenceNum++;
+
+        // to do.
+
+
+        return false;
+    }
+
+    // close the connection using FIN
+    public void disconnect() throws IOException
+    {
+        if(state != ClientState.ESTABLISHED)
+        {
+            return;
+        }
+
+        System.out.println("====== Terminating Connection ======");
+
+        Message fin = new Message(Message.FIN, sequenceNum);
+        sendMessage(fin);
+        state = ClientState.FIN_WAIT;
+        System.out.println("[CLIENT] Message[Type = FIN, Sequence Number = " + sequenceNum + "]");
+
+        for(int i = 0; i < MAX_RETRIES; i++)
+        {
+            try 
+            {
+                Message response = receiveMessage();
+
+                if(response.getMessageType() == Message.FIN_ACK)
+                {
+                    System.out.println("Received FIN_ACK");
+                    state = ClientState.CLOSED;
+                    System.out.println("===== Connection Closed ======");
+                    return;
+                }
+            }
+            catch (SocketTimeoutException e)
+            {
+                System.out.println("Timeout waiting for ACK, retrying (" + (i + 1) + "/" + MAX_RETRIES + ")");
+                sendMessage(fin);
+            }
+        }
+
+        state = ClientState.CLOSED;
+        System.out.println("Forced disconnect after timeout.");
     }
 
     // closes the client socket and releases system resources

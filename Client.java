@@ -6,6 +6,10 @@ import java.io.*;
 
 /**
  *  The class Client represents a client in the reliable data transfer protocol over UDP.
+ *  It supports session establishment (three-way handshake), file download, file upload, and clean session termination.
+ *  
+ *  Each DATA packet is acknowledged individually before the next one is sent. 
+ *  Lost packets are detected via timeout and retransmitted up to MAX_RETRIES times.
  * 
  *  @author Sky Hannah Parado
  *  @author Rhian Claire Yamsuan
@@ -13,37 +17,62 @@ import java.io.*;
  */
 public class Client
 {
-    // possible states of the client during the protocol lifecycle
+    /**
+     * Client states as defined by the protocol state machine.
+     *
+     *  CLOSED      — no active session
+     *  SYN_SENT    — SYN sent, waiting for SYN_ACK
+     *  ESTABLISHED — session active, ready for file operations
+     *  FIN_WAIT    — FIN sent, waiting for FIN_ACK
+     */
     private enum ClientState 
     {
         CLOSED, SYN_SENT, ESTABLISHED, FIN_WAIT;
     }
 
-    // client contructor
+    /**
+     * Creates a Client bound to the given local port.
+     * The initial SeqNum (ISN) is fixed at 1 for reproducibility.
+     * @param clientPort  local UDP port to bind to
+     * @throws SocketException if the socket cannot be created
+     */
     public Client(int clientPort) throws SocketException
     {
         UDPsocket = new DatagramSocket(clientPort);
         UDPsocket.setSoTimeout(TIMEOUT);
         state = ClientState.CLOSED;
-        sequenceNum = new Random().nextInt(1000);
+        sequenceNum = 0;
 
-        System.out.println("Client port number: " + clientPort);
-        System.out.println("Initial sequence number: " + sequenceNum);
+        System.out.println("[CLIENT] Port Number = " + clientPort + ", Initial SeqNum: " + sequenceNum);
     }
 
-    // establish connection with server
+    /**
+     * Performs the three-way handshake to establish a session with the server.
+     *
+     * Handshake flow:
+     *   1. Client sends SYN(ISN)
+     *   2. Server responds with SYN_ACK(ISN)
+     *   3. Client sends ACK(ISN+1)
+     *
+     * After a successful handshake, session parameters are printed:
+     * both sides have agreed on the ISN, max payload size, timeout, and retries.
+     *
+     * @param serverHost  hostname or IP of the server
+     * @param serverPort  UDP port the server is listening on
+     * @return true if connection was established, false otherwise
+     */
     public boolean connect(String serverHost, int serverPort) throws IOException 
     {
         serverAddress = InetAddress.getByName(serverHost);
         this.serverPort = serverPort;
 
-        System.out.println("===== Establishing Connection =====");
+        System.out.println(Colors.cyan("\n===== Establishing Connection ====="));
 
         Message syn = new Message(Message.SYN, sequenceNum);
         sendMessage(syn);
         state = ClientState.SYN_SENT;
 
-        System.out.println("[CLIENT] Message[Type = SYN, Sequence Number = " + sequenceNum + "]");
+        System.out.println("[CLIENT] Message sent [Type = SYN, SeqNum = " + sequenceNum + "]");
 
         // wait for SYN_ACK from server until 3 attempts
         for(int i = 0; i < MAX_RETRIES; i++)
@@ -54,34 +83,47 @@ public class Client
 
                 if(response.getMessageType() == Message.SYN_ACK && response.getSequenceNum() == sequenceNum)
                 {
-                    System.out.println("[CLIENT] Received SYN_ACK");
+                    System.out.println("[CLIENT] Received SYN_ACK, SeqNum = " + response.getSequenceNum());
 
                     sequenceNum++;
                     Message ack = new Message(Message.ACK, sequenceNum);
                     sendMessage(ack);
-                    System.out.println("[CLIENT] Message[Type = ACK, Sequence Number = " + sequenceNum + "]");
+                    System.out.println("[CLIENT] Message sent [Type = ACK, SeqNum = " + sequenceNum + "]");
 
                     expectedAckNum = sequenceNum;
                     state = ClientState.ESTABLISHED;
 
-                    System.out.print("===== Connection Established =====");
+                    System.out.println(Colors.bold(Colors.green("CONNECTION ESTABLISHED")));
+                    System.out.println("\n[CLIENT] Session parameters:");
+                    System.out.println("         Server      : " + serverHost + ":" + serverPort);
+                    System.out.println("         ISN         : " + (sequenceNum - 1));
+                    System.out.println("         Max payload : " + MAX_PAYLOAD_SIZE + " bytes");
+                    System.out.println("         Timeout     : " + TIMEOUT + " ms");
+                    System.out.println("         Max retries : " + MAX_RETRIES);
+
                     return true;
+                }
+                else
+                {
+                    System.out.println(Colors.yellow("[CLIENT] Unexpected response during handshake: " + response.msgTypeString()));
                 }
             }
             catch (SocketTimeoutException e)
             {
-                System.out.println("Timeout waiting for SYN_ACK, retrying (" + (i + 1) + "/" + MAX_RETRIES + ")");
-                sendMessage(syn);
+                System.out.println(Colors.yellow("Timeout waiting for SYN_ACK, retrying (" + (i + 1) + "/" + MAX_RETRIES + ")"));
+                sendMessage(syn); // retransmit SYN
             }
         }
 
-        System.out.println("Failed to establish connection after " + MAX_RETRIES + "attempts");
+        System.out.println(Colors.red("Failed to establish connection after " + MAX_RETRIES + "attempts"));
         state = ClientState.CLOSED;
 
         return false;
     }
 
-    // sends a protocol message to the server over UDP
+    /**
+     * Serializes and sends a Message to the server.
+     */
     private void sendMessage(Message message) throws IOException
     {
         byte[] data = message.convertToBytes();
@@ -89,7 +131,10 @@ public class Client
         UDPsocket.send(packet);
     } 
 
-    // receives a protocol message from the server over UDP
+    /**
+     * Blocks until a UDP datagram arrives from the server, then parses it.
+     * Throws SocketTimeoutException if no packet arrives within TIMEOUT ms.
+     */
     private Message receiveMessage() throws IOException
     {
         byte[] buffer = new byte[BUFFER_SIZE];
@@ -99,14 +144,29 @@ public class Client
         return Message.convertToMessage(Arrays.copyOf(packet.getData(), packet.getLength()));
     }
 
+    /**
+     * Waits for an ACK with the specified SeqNum.
+     * Returns true if the expected ACK is received, false on wrong ACK or timeout.
+     */
     private boolean waitAck(int expectedSeq) throws IOException
     {
-        Message response = receiveMessage();
-
-        if(response.getMessageType() == Message.ACK && response.getSequenceNum() == expectedSeq)
+        try 
         {
-            System.out.println("[CLIENT] Received ACK for sequence number = " + expectedSeq);
-            return true;
+            Message response = receiveMessage();
+
+            if(response.getMessageType() == Message.ACK && response.getSequenceNum() == expectedSeq)
+            {
+                System.out.println("Received ACK for SeqNum = " + expectedSeq);
+                return true;
+            }
+            else
+            {
+                System.out.println(Colors.yellow("[CLIENT] Wrong ACK: Expected SeqNum=" + expectedSeq + ", Received SeqNum =" + response.getSequenceNum()));
+            }
+        }
+        catch (SocketTimeoutException e)
+        {
+            System.out.println("[CLIENT] Timeout waiting for ACK SeqNum = " + expectedSeq);
         }
 
         return false;
@@ -133,6 +193,10 @@ public class Client
         throw new IOException("Failed to send message after " + MAX_RETRIES + " retries");
     }
 
+    /**
+     * Writes a list of byte chunks to a file in order.
+     * Used to reassemble a received file after all chunks are collected.
+     */
     private void writeChunksToFile(List<byte[]> chunks, String filename) throws IOException
     {
         FileOutputStream fos = null;
@@ -156,28 +220,41 @@ public class Client
         }
     }
 
+    /**
+     * Downloads a file from the server and saves it locally.
+     *
+     * Protocol flow:
+     *   1. Client sends DATA(sequenceNum, filename) as a download request.
+     *   2. Server responds with DATA packets (stop-and-wait).
+     *   3. Client ACKs each in-order packet; sends duplicate ACK for out-of-order.
+     *   4. Server sends FIN when all data is sent; client responds with FIN_ACK.
+     *   5. Client reassembles chunks and writes the file.
+     *
+     * @param remoteFilename  filename to request from the server
+     * @param localFilename   local path to save the downloaded file
+     * @return true if the file was downloaded successfully, false otherwise
+     */
     public boolean downloadFile(String remoteFilename, String localFilename) throws IOException
     {
         if(state != ClientState.ESTABLISHED)
         {
-            System.out.println("Cannot start download. Connection is not established");
+            System.out.println(Colors.red("Cannot start download. Connection is not established"));
             return false;
         }
 
-        System.out.println("===== Starting File Download =====");
-        System.out.println("Remote filename (source): " + remoteFilename);
-        System.out.println("Local filename (destination): " + localFilename);
+        System.out.println(Colors.cyan("\n===== Starting File Download ====="));
+        System.out.println("Remote: " + remoteFilename + "  ->  Local: " + localFilename);
 
         // send read request to server
-        byte[] filenameInBytes = remoteFilename.getBytes();
-        Message readRequest = new Message(Message.DATA, sequenceNum, filenameInBytes);
-        System.out.println("Sending read request...");
+        Message readRequest = new Message(Message.DATA, sequenceNum, remoteFilename.getBytes());
+        System.out.println("\nSending read request...");
         sendMessage(readRequest);
-        System.out.println("[CLIENT] Message[Type = DATA, Sequence Number = %d" + sequenceNum + " ]");
+        System.out.println("[CLIENT] Sent download request. SeqNum = " + sequenceNum + ", File = '" + remoteFilename + "'");
         sequenceNum++;
 
         List<byte[]> receivedChunks = new ArrayList<>();
-        int expectedSeq = 0;
+        int isn = sequenceNum - 2;
+        int expectedSeq = isn + 1;
         boolean complete = false;
 
         while(!complete)
@@ -189,51 +266,49 @@ public class Client
                 if(response.getMessageType() == Message.ERROR)
                 {
                     String error = new String(response.getPayload());
-                    System.out.println("Received server error message: " + error);
+                    System.out.println("Received server error message: " + Colors.red(error));
                     return false;
                 }
-
-                if(response.getMessageType() == Message.DATA)
+                else if(response.getMessageType() == Message.DATA)
                 {
                     int recvSeqNum = response.getSequenceNum();
                     int recvPayloadLen = response.getPayloadLen();
-                    System.out.println("Received DATA packet: Sequence Number = " + recvSeqNum + ", Payload Length = " + recvPayloadLen);
+                    System.out.println("Received DATA packet. SeqNum = " + recvSeqNum + ", Payload Length = " + recvPayloadLen);
 
                     if(recvSeqNum == expectedSeq)
                     {
                         receivedChunks.add(response.getPayload());
-                        expectedSeq++;
-
                         Message ack = new Message(Message.ACK, recvSeqNum);
                         sendMessage(ack);
-                        System.out.println("[CLIENT] Message[Type = ACK, Sequence Number = " + recvSeqNum + "]");
+                        System.out.println("[CLIENT] Message sent [Type = ACK, SeqNum = " + recvSeqNum + "]");
+                        expectedSeq++;
                     }
                     else 
                     {
-                        System.out.println("Out of order packet. Expexted Sequence Number = " + expectedSeq + ", Received Sequence Number = " + recvSeqNum);
+                        System.out.println(Colors.yellow("Out of order packet. Expexted SeqNum = " + expectedSeq + ", Received SeqNum = " + recvSeqNum));
                             
                         // if packet is duplicate
-                        if(expectedSeq > 0)
+                        if(expectedSeq > isn + 1)
                         {
-                            Message ack = new Message(Message.ACK, expectedSeq - 1);
-                            sendMessage(ack);
+                            Message dupeAck = new Message(Message.ACK, expectedSeq - 1);
+                            sendMessage(dupeAck);
+                            System.out.println("[CLIENT] Sent duplicate ACK for SeqNum = " + (expectedSeq - 1));
                         }
                     }
                 }
-
-                if(response.getMessageType() == Message.FIN)
+                else if(response.getMessageType() == Message.FIN)
                 {
-                    System.out.println("Received FIN message: File download complete");
+                    System.out.println("Received FIN message.");
 
                     Message fin_ack = new Message(Message.FIN_ACK, response.getSequenceNum());
                     sendMessage(fin_ack);
-                    System.out.println("[CLIENT] Message[Type = FIN_ACK, Sequence Number = "+ response.getSequenceNum() + "]");
+                    System.out.println("[CLIENT] Message sent [Type = FIN_ACK, SeqNum = "+ response.getSequenceNum() + "]");
                     complete = true;
                 }
             }
             catch (SocketTimeoutException e)
             {
-                System.out.println("Timeout waiting for data.");
+                System.out.println(Colors.yellow("Timeout waiting for data."));
 
                 // request retransmission
                 // System.out.println("Request Retransmission");
@@ -244,8 +319,10 @@ public class Client
         if(complete)
         {
             writeChunksToFile(receivedChunks, localFilename);
-            System.out.println("File Downloaded Successfully at filename '" + localFilename + "'");
+            System.out.println("File Downloaded Successfully -> '" + localFilename + "'");
             System.out.println("Total packet received: " + receivedChunks.size());
+            System.out.println(Colors.green("FILE DOWNLOAD COMPLETE"));
+
             return true;
         }
 
@@ -256,35 +333,121 @@ public class Client
     {
         if(state != ClientState.ESTABLISHED)
         {
-            System.out.println("Cannot upload file. Connection is not established");
+            System.out.println(Colors.red("Cannot upload file. Connection is not established"));
             return false;
         }
 
-        System.out.println("===== Starting File Upload =====");
-        System.out.println("Local filename (source): " + localFilename);
-        System.out.println("Remote filename (destination): " + remoteFilename);
+        System.out.println(Colors.cyan("\n===== Starting File Upload ====="));
+        System.out.println("Local: " + localFilename + "  ->   Remote: " + remoteFilename);
 
         File file = new File(localFilename);
         if(!file.exists())
         {
-            System.out.println("Error: File not found.");
+            System.out.println(Colors.red("Error: File not found."));
             return false;
         }
 
         Message filename = new Message(Message.DATA, sequenceNum, remoteFilename.getBytes());
         sendMessage(filename);
-        System.out.println("Filename sent: Sequence Number = " + sequenceNum);
+        System.out.println("[CLIENT] Sent filename: SeqNum = " + sequenceNum);
 
-        waitAck(sequenceNum);
+        if(!waitAck(sequenceNum))
+        {
+            System.out.println(Colors.red("[CLIENT] No ACK received for filename. Upload aborted."));
+            return false;
+        }
         sequenceNum++;
 
-        // to do.
+        FileInputStream fis = null;
 
+        try 
+        {
+            fis = new FileInputStream(file);
+            byte[] buffer = new byte[MAX_PAYLOAD_SIZE];
+            int bytesRead;
+            int dataSequence = sequenceNum - 1;
 
-        return false;
+            while ((bytesRead = fis.read(buffer)) != -1)
+            {
+                byte[] payload = Arrays.copyOf(buffer, bytesRead);
+                Message data = new Message(Message.DATA, dataSequence, payload);
+                boolean acked = false;
+
+                for(int i = 0; i < MAX_RETRIES && !acked; i++)
+                {
+                    sendMessage(data);
+                    System.out.println("[CLIENT] Message sent [Type = DATA, SeqNum = " + dataSequence + ", Payload = " + bytesRead + " bytes]");
+
+                    if (waitAck(dataSequence))
+                    {
+                        acked = true;
+                    }
+                    else
+                    {
+                        System.out.println("[CLIENT] Retrying SeqNum = " + dataSequence + " (attempt " + (i + 1) + "/" + MAX_RETRIES + ")");
+                    }
+                }
+
+                if(!acked)
+                {
+                    System.out.println(Colors.red("[CLIENT] Failed to send DATA SeqNum = " + dataSequence + ". Upload aborted"));
+                    return false;
+                }
+
+                dataSequence++;
+            }
+
+            Message fin = new Message(Message.FIN, dataSequence);
+            boolean complete = false;
+
+            for(int i = 0; i < MAX_RETRIES && !complete; i++)
+            {
+                sendMessage(fin);
+                System.out.println("[CLIENT] Message sent [Type = FIN, SeqNum = " + dataSequence + "]");
+
+                try
+                {
+                    Message response = receiveMessage();
+
+                    if(response.getMessageType() == Message.FIN_ACK)
+                    {
+                        System.out.println("Received FIN_ACK.");
+                        complete = true;
+                    }
+                }
+                catch (SocketTimeoutException e)
+                {
+                    System.out.println("Timeout waiting for FIN_ACK, retrying (" + (i + 1) + "/" + MAX_RETRIES + ")");
+                }
+            }
+
+            if(complete)
+            {
+                System.out.println(Colors.green("File Uploaded Successfully -> '" + remoteFilename + "'"));
+                System.out.println("Total packet sent: " + (dataSequence - (sequenceNum - 1)));
+                System.out.println(Colors.green("FILE UPLOADED SUCCESSFULLY"));
+                return true;
+            }
+            else 
+            {
+                System.out.println(Colors.red("Upload FIN not acknowledged. Transfer may be incomplete."));
+                return false;
+            }
+        }
+        finally
+        {
+            if (fis != null)
+            {
+                fis.close();
+            }
+        }
     }
 
-    // close the connection using FIN
+    /**
+     * Performs the session teardown by sending FIN and waiting for FIN_ACK.
+     * Uses sequenceNum (the connection-level counter) for the FIN message.
+     * If no FIN_ACK is received after MAX_RETRIES, forces the session closed.
+     */
     public void disconnect() throws IOException
     {
         if(state != ClientState.ESTABLISHED)
@@ -292,12 +455,12 @@ public class Client
             return;
         }
 
-        System.out.println("====== Terminating Connection ======");
+        System.out.println(Colors.cyan("\n====== Terminating Connection ======"));
 
         Message fin = new Message(Message.FIN, sequenceNum);
         sendMessage(fin);
         state = ClientState.FIN_WAIT;
-        System.out.println("[CLIENT] Message[Type = FIN, Sequence Number = " + sequenceNum + "]");
+        System.out.println("[CLIENT] Message sent [Type = FIN, SeqNum = " + sequenceNum + "]");
 
         for(int i = 0; i < MAX_RETRIES; i++)
         {
@@ -309,22 +472,22 @@ public class Client
                 {
                     System.out.println("Received FIN_ACK");
                     state = ClientState.CLOSED;
-                    System.out.println("===== Connection Closed ======");
+                    System.out.println(Colors.green("CONNECTION CLOSED"));
                     return;
                 }
             }
             catch (SocketTimeoutException e)
             {
                 System.out.println("Timeout waiting for ACK, retrying (" + (i + 1) + "/" + MAX_RETRIES + ")");
-                sendMessage(fin);
+                sendMessage(fin); // retransmit FIN message
             }
         }
 
         state = ClientState.CLOSED;
-        System.out.println("Forced disconnect after timeout.");
+        System.out.println(Colors.red("Forced disconnect after timeout."));
     }
 
-    // closes the client socket and releases system resources
+     /** Closes the UDP socket and releases system resources. */
     public void close()
     {
         if(UDPsocket != null && !UDPsocket.isClosed())
@@ -335,7 +498,7 @@ public class Client
 
     public static void main (String[] args)
     {
-        System.out.println("===== Starting SENDER program =====");
+        System.out.println(Colors.cyan("===== Starting CLIENT program ====="));
         Scanner scanner = new Scanner(System.in);
         Client client = null;
 
@@ -355,13 +518,13 @@ public class Client
                 serverHost = "localhost";
             }
 
-            System.out.println("Enter server port: ");
+            System.out.print("Enter server port: ");
             int serverPort = scanner.nextInt();
             scanner.nextLine();
 
             if(!client.connect(serverHost, serverPort))
             {
-                System.out.println("Failed to establish connection to server.");
+                System.out.println(Colors.red("Failed to establish connection to server."));
                 return;
             }
 
@@ -369,35 +532,45 @@ public class Client
 
             while(!flag)
             {
-                System.out.println("\nFile Transfer Functionality Options:");
+                System.out.println(Colors.cyan("\n===== File Transfer Functionality ====="));
                 System.out.println("[1] Download File");
                 System.out.println("[2] Upload File");
                 System.out.println("[X] Disconnect");
-                System.out.println("Choose option: ");
+                System.out.print("Choose option: ");
 
                 String choice = scanner.nextLine();
 
-                /* to be implemented
                 switch(choice)
                 {
-                    case 1:
-                        System.out.println("Enter ")
+                    case "1":
+                        System.out.println(Colors.cyan("\n===== Download File ====="));
+                        System.out.print("Enter remote filename (on server): ");
+                        String remoteFile = scanner.nextLine().trim();
+                        System.out.print("Enter local filename to save as: ");
+                        String localFile = scanner.nextLine().trim();
+                        client.downloadFile(remoteFile, localFile);
                         break;
-                    case 2:
-
+                    case "2":
+                        System.out.println(Colors.cyan("\n===== Upload File ====="));
+                        System.out.print("Enter local filename to upload: ");
+                        String localUpload = scanner.nextLine().trim();
+                        System.out.print("Enter remote filename to save as: ");
+                        String remoteUpload = scanner.nextLine().trim();
+                        client.uploadFile(localUpload, remoteUpload);
                         break;
-                    case 'X':
-                    case 'x':
+                    case "X":
+                    case "x":
                         flag = true;
                         break;
-                    default: System.out.println("Invalid option.");
+                    default: System.out.println("Invalid option. Please choose 1, 2, or X.");
                 }
-                */
             }
+
+            client.disconnect();
         } 
         catch (Exception e)
         {
-            System.out.println("Error: " + e.toString());
+            System.out.println(Colors.red("Error: " + e.toString()));
             return;
         }
         finally
@@ -410,6 +583,7 @@ public class Client
         }
     }
 
+    /** fields */
     private DatagramSocket UDPsocket;
     private InetAddress serverAddress;
     private ClientState state;
@@ -417,6 +591,7 @@ public class Client
     private int sequenceNum;
     private int expectedAckNum;
 
+    /** configuration constants */
     private static final int TIMEOUT = 5000; // 5 seconds
     private static final int MAX_RETRIES = 3;
     private static final int BUFFER_SIZE = 1024;

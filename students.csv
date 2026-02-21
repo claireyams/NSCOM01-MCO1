@@ -1,0 +1,21 @@
+StudentID,LastName,FirstName,Course,Year,Subject,Prelim,Midterm,Finals,FinalGrade,Status
+20210001,Santos,Maria,BSCS,3,Data Communications,88,91,90,89.67,Passed
+20210002,Reyes,Juan,BSCS,3,Data Communications,75,78,80,77.67,Passed
+20210003,Cruz,Angela,BSIT,3,Data Communications,92,95,94,93.67,Passed
+20210004,Garcia,Miguel,BSCS,3,Data Communications,60,58,55,57.67,Failed
+20210005,Dela Cruz,Sofia,BSIT,3,Data Communications,85,83,87,85.00,Passed
+20210006,Mendoza,Carlos,BSCS,3,Data Communications,70,72,68,70.00,Passed
+20210007,Flores,Isabella,BSIT,3,Data Communications,55,50,48,51.00,Failed
+20210008,Torres,Rafael,BSCS,3,Data Communications,90,88,92,90.00,Passed
+20210009,Ramos,Gabrielle,BSIT,3,Data Communications,78,80,76,78.00,Passed
+20210010,Aquino,Paolo,BSCS,3,Data Communications,65,63,67,65.00,Passed
+20210011,Villanueva,Andrea,BSCS,3,Data Communications,95,97,96,96.00,Passed
+20210012,Lim,Marco,BSIT,3,Data Communications,72,70,74,72.00,Passed
+20210013,Tan,Bianca,BSCS,3,Data Communications,83,85,81,83.00,Passed
+20210014,Castillo,Jerome,BSIT,3,Data Communications,50,48,45,47.67,Failed
+20210015,Bautista,Katrina,BSCS,3,Data Communications,88,90,89,89.00,Passed
+20210016,Gonzales,Luis,BSIT,3,Data Communications,76,74,78,76.00,Passed
+20210017,Hernandez,Patricia,BSCS,3,Data Communications,91,93,90,91.33,Passed
+20210018,Perez,Daniel,BSIT,3,Data Communications,67,65,69,67.00,Passed
+20210019,Delos Santos,Camille,BSCS,3,Data Communications,80,82,84,82.00,Passed
+20210020,Soriano,Ryan,BSIT,3,Data Communications,58,55,52,55.00,Failed

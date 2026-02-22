@@ -1,11 +1,27 @@
 import java.io.*;
 import java.nio.ByteBuffer;
+import java.security.*;
+import java.util.Arrays;
 
 //last update: Feb 21, 2026 10:05am
 
 /**
  *  The class Message represents a message in the reliable data transfer protocol over UDP.
  * 
+ *  Each message has a fixed 9-byte header followed by the payload and a 32-byte
+ *  SHA-256 hash of the payload, appended at the end.
+ *
+ *  Wire format:
+ *    [1 byte  messageType ]
+ *    [4 bytes sequenceNum ]
+ *    [4 bytes payloadLen  ]
+ *    [N bytes payload     ]  (N = payloadLen)
+ *    [32 bytes SHA-256    ]  (hash of payload only)
+ *
+ *  On receipt, convertToMessage() recomputes the SHA-256 of the payload and
+ *  compares it against the appended hash. A mismatch means the packet was
+ *  corrupted or tampered with in transit, and a SecurityException is thrown.
+ *  
  *  @author Sky Hannah Parado
  *  @author Rhian Claire Yamsuan
  *  @version 1.0
@@ -13,7 +29,7 @@ import java.nio.ByteBuffer;
 
 public class Message implements Serializable
 {
-    // message constructor
+    /** Full constructor with payload. */
     public Message(byte mtype, int snum, byte[] pload)
     {
         messageType = mtype;
@@ -30,35 +46,85 @@ public class Message implements Serializable
         }
     }
 
-    // another message constructor
+    /** Convenience constructor for control messages with no payload. */
     public Message(byte mtype, int snum)
     {
         this(mtype, snum, null);
     }
 
-    // converts a message object into a byte array that can be sent over the network
-    public byte[] convertToBytes()
+    /**
+     * Computes a SHA-256 hash of the given data for per-packet integrity checking.
+     * Returns the hash of an empty byte array if data is null.
+     */
+    private static byte[] computeHash(byte[] data)
     {
-        // allocate 9 bytes (1 for messageType, 4 for sequenceNum, and 4 for payloadLen) for the header + payload length)
-        ByteBuffer buffer = ByteBuffer.allocate(9 + payloadLen);
-        buffer.put(messageType);
-        buffer.putInt(sequenceNum);
-        buffer.putInt(payloadLen);
-
-        if(payload != null)
+        try
         {
-            buffer.put(payload);
-        }
+            MessageDigest msgDigest = MessageDigest.getInstance("SHA-256");
 
-        return buffer.array();
+            if(data != null)
+            {
+                return msgDigest.digest(data);
+            }
+
+            return msgDigest.digest(new byte[0]);
+        }
+        catch (NoSuchAlgorithmException e)
+        {
+            throw new RuntimeException(e);
+        }
     }
 
-    // converts received bytes back into a Message object
+    /**
+     * Converts this Message into a byte array suitable for UDP transmission.
+     *
+     * Appends a 32-byte SHA-256 hash of the payload at the end so the receiver
+     * can verify the packet was not corrupted or altered in transit.
+     *
+     * @return serialized message bytes: 9-byte header + payload + 32-byte hash
+     */
+    public byte[] convertToBytes()
+    {
+        try 
+        {
+            byte[] hash = computeHash(payload);
+
+            // 9 bytes header + payload bytes + 32-byte SHA-256 hash
+            ByteBuffer buffer = ByteBuffer.allocate(9 + payloadLen + hash.length);
+            buffer.put(messageType);
+            buffer.putInt(sequenceNum);
+            buffer.putInt(payloadLen);
+
+            if(payload != null)
+            {
+                buffer.put(payload);
+            }
+
+            buffer.put(hash);
+            return buffer.array();
+        }
+        catch (Exception e)
+        {
+            throw new RuntimeException(e);
+        }
+    }
+
+    /**
+     * Reconstructs a Message from raw bytes received over UDP.
+     *
+     * After parsing the header and payload, re-computes the SHA-256 hash of the
+     * payload and compares it to the 32-byte hash appended to the packet.
+     * 
+     * @param data  raw bytes from a DatagramPacket (after AES decryption)
+     * @return      parsed and integrity-verified Message
+     * @throws IllegalArgumentException if the byte array is too short
+     * @throws SecurityException        if SHA-256 verification fails
+     */
     public static Message convertToMessage(byte[] data)
     {
-        if(data.length < 9)
+        if(data.length < 9 + 32)
         {
-            throw new IllegalArgumentException("Message is too short.");
+            throw new IllegalArgumentException("Message is too short to contain a valid header and hash.");
         }
 
         ByteBuffer buffer = ByteBuffer.wrap(data);
@@ -68,16 +134,27 @@ public class Message implements Serializable
 
         byte[] payload = null;
 
-        if(payloadLen > 0 && buffer.remaining() >= payloadLen)
+        if(payloadLen > 0)
         {
             payload = new byte[payloadLen];
             buffer.get(payload);
         }
 
+        byte[] receivedHash = new byte[32];
+        buffer.get(receivedHash);
+
+        // recompute the hash of the payload and compare against the appended hash.
+        if(!Arrays.equals(receivedHash, computeHash(payload)))
+        {
+            System.out.println(Colors.red("[INTEGRITY] SHA-256 MISMATCH. Packet corrupted or Tampered | SeqNum = " + sequenceNum));
+            throw new SecurityException("Hash verification failed for SeqNum = " + sequenceNum);
+        }
+
+        System.out.println(Colors.green("[INTEGRITY] SHA-256 VERIFIED | SeqNum = " + sequenceNum));
         return new Message(messageType, sequenceNum, payload);
     }
 
-    // return the message type in string
+    /** Returns the message type as a human-readable string. */
     public String msgTypeString()
     {
         switch(messageType)

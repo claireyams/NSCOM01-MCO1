@@ -43,7 +43,7 @@ public class Client
         state = ClientState.CLOSED;
         sequenceNum = 0;
 
-        System.out.println("[CLIENT] Port Number = " + clientPort + ", Initial SeqNum: " + sequenceNum);
+        System.out.println("[CLIENT] Port Number = " + clientPort + " | Initial SeqNum: " + sequenceNum);
     }
 
     /**
@@ -127,6 +127,7 @@ public class Client
     private void sendMessage(Message message) throws IOException
     {
         byte[] data = message.convertToBytes();
+        data = Cryptography.encrypt(data);
         DatagramPacket packet = new DatagramPacket(data, data.length, serverAddress, serverPort); 
         UDPsocket.send(packet);
     } 
@@ -140,8 +141,9 @@ public class Client
         byte[] buffer = new byte[BUFFER_SIZE];
         DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
         UDPsocket.receive(packet);
+        byte[] decrypted = Cryptography.decrypt(Arrays.copyOf(packet.getData(), packet.getLength()));
         
-        return Message.convertToMessage(Arrays.copyOf(packet.getData(), packet.getLength()));
+        return Message.convertToMessage(decrypted);
     }
 
     /**
@@ -249,12 +251,11 @@ public class Client
         Message readRequest = new Message(Message.DATA, sequenceNum, remoteFilename.getBytes());
         System.out.println("\nSending read request...");
         sendMessage(readRequest);
-        System.out.println("[CLIENT] Sent download request. SeqNum = " + sequenceNum + ", File = '" + remoteFilename + "'");
+        System.out.println("[CLIENT] Sent download request. Expected SeqNum = " + sequenceNum + ", File = '" + remoteFilename + "'");
         sequenceNum++;
 
         List<byte[]> receivedChunks = new ArrayList<>();
-        int isn = sequenceNum - 2;
-        int expectedSeq = isn + 1;
+        int expectedSeq = sequenceNum - 1;
         boolean complete = false;
 
         while(!complete)
@@ -285,10 +286,10 @@ public class Client
                     }
                     else 
                     {
-                        System.out.println(Colors.yellow("Out of order packet. Expexted SeqNum = " + expectedSeq + ", Received SeqNum = " + recvSeqNum));
+                        System.out.println(Colors.yellow("Out of order packet. Expected SeqNum = " + expectedSeq + ", Received SeqNum = " + recvSeqNum));
                             
                         // if packet is duplicate
-                        if(expectedSeq > isn + 1)
+                        if(expectedSeq > sequenceNum - 1)
                         {
                             Message dupeAck = new Message(Message.ACK, expectedSeq - 1);
                             sendMessage(dupeAck);
@@ -298,7 +299,7 @@ public class Client
                 }
                 else if(response.getMessageType() == Message.FIN)
                 {
-                    System.out.println("Received FIN message.");
+                    System.out.println("Received FIN for SeqNum = " + response.getSequenceNum());
 
                     Message fin_ack = new Message(Message.FIN_ACK, response.getSequenceNum());
                     sendMessage(fin_ack);
@@ -411,7 +412,7 @@ public class Client
 
                     if(response.getMessageType() == Message.FIN_ACK)
                     {
-                        System.out.println("Received FIN_ACK.");
+                        System.out.println("Received FIN_ACK for SeqNum = " + response.getSequenceNum());
                         complete = true;
                     }
                 }
@@ -470,7 +471,7 @@ public class Client
 
                 if(response.getMessageType() == Message.FIN_ACK)
                 {
-                    System.out.println("Received FIN_ACK");
+                    System.out.println("Received FIN_ACK for SeqNum = " + response.getSequenceNum());
                     state = ClientState.CLOSED;
                     System.out.println(Colors.green("CONNECTION CLOSED"));
                     return;
@@ -594,6 +595,6 @@ public class Client
     /** configuration constants */
     private static final int TIMEOUT = 5000; // 5 seconds
     private static final int MAX_RETRIES = 3;
-    private static final int BUFFER_SIZE = 1024;
+    private static final int BUFFER_SIZE = 4096;
     private static final int MAX_PAYLOAD_SIZE = 1000;
 }

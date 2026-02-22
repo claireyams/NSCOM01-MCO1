@@ -34,7 +34,7 @@ public class Server
 
     private static final int TIMEOUT = 5000; // 5 seconds
     private static final int MAX_RETRIES = 3;
-    private static final int BUFFER_SIZE = 1024;
+    private static final int BUFFER_SIZE = 4096;
     private static final int MAX_PAYLOAD_SIZE = 1000;
 
     /**
@@ -54,6 +54,7 @@ public class Server
     private void sendMessage(Message message) throws IOException
     {
         byte[] data = message.convertToBytes();
+        data = Cryptography.encrypt(data);
         DatagramPacket packet = new DatagramPacket(data, data.length, clientAddress, clientPort);
         UDPsocket.send(packet);
     }
@@ -67,7 +68,8 @@ public class Server
         clientAddress = packet.getAddress();
         clientPort = packet.getPort();
 
-        return Message.convertToMessage(Arrays.copyOf(packet.getData(), packet.getLength()));
+        byte[] decrypted = Cryptography.decrypt(Arrays.copyOf(packet.getData(), packet.getLength()));
+        return Message.convertToMessage(decrypted);
     }
 
     /**
@@ -183,7 +185,7 @@ public class Server
             fis = new FileInputStream(file);
             byte[] buffer = new byte[MAX_PAYLOAD_SIZE];
             int bytesRead;
-            int seq = clientSeqBase + 1;
+            int seq = request.getSequenceNum();
 
             
             while ((bytesRead = fis.read(buffer)) != -1)
@@ -230,6 +232,12 @@ public class Server
             Message fin = new Message(Message.FIN, seq);
             sendMessage(fin);
             System.out.println("[SERVER] Message sent [Type = FIN, SeqNum = "+ seq + "]");
+
+            Message response = receiveMessage();
+            if(response.getMessageType() == Message.FIN_ACK)
+            {
+                System.out.println("Received FIN_ACK for SeqNum = " + response.getSequenceNum());
+            }
         }
         finally
         {

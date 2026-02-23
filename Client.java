@@ -61,6 +61,7 @@ public class Client
      * @param serverPort  UDP port the server is listening on
      * @return true if connection was established, false otherwise
      */
+
     public boolean connect(String serverHost, int serverPort) throws IOException 
     {
         serverAddress = InetAddress.getByName(serverHost);
@@ -122,8 +123,8 @@ public class Client
     }
 
     /**
-     * Serializes and sends a Message to the server.
-     */
+     * WORKING: Serializes and sends a Message to the server.
+    
     private void sendMessage(Message message) throws IOException
     {
         byte[] data = message.convertToBytes();
@@ -131,6 +132,22 @@ public class Client
         DatagramPacket packet = new DatagramPacket(data, data.length, serverAddress, serverPort); 
         UDPsocket.send(packet);
     } 
+    **/
+    // DEBUG: simulate packet loss (30% drop)
+    private static final double DROP_RATE = 0.3;
+
+    private void sendMessage(Message message) throws IOException {
+        if (Math.random() < DROP_RATE) {
+            System.out.println("[DEBUG] Simulated packet drop: " + message.msgTypeString() +
+                            " Seq=" + message.getSequenceNum());
+            return; // pretend packet was sent
+        }
+
+        byte[] data = message.convertToBytes();
+        data = Cryptography.encrypt(data);
+        DatagramPacket packet = new DatagramPacket(data, data.length, serverAddress, serverPort);
+        UDPsocket.send(packet);
+    }
 
     /**
      * Blocks until a UDP datagram arrives from the server, then parses it.

@@ -361,87 +361,69 @@ public class Client
 
         FileInputStream fis = null;
 
-        try 
-        {
+        try {
             fis = new FileInputStream(file);
             byte[] buffer = new byte[MAX_PAYLOAD_SIZE];
             int bytesRead;
-            int dataSequence = sequenceNum - 1;
 
-            while ((bytesRead = fis.read(buffer)) != -1)
-            {
-                byte[] payload = Arrays.copyOf(buffer, bytesRead);
-                Message data = new Message(Message.DATA, dataSequence, payload);
+            while ((bytesRead = fis.read(buffer)) != -1) {
+                byte[] payload = Arrays.copyOf(buffer, bytesRead);  
+                Message data = new Message(Message.DATA, sequenceNum, payload);
                 boolean acked = false;
 
-                for(int i = 0; i < MAX_RETRIES && !acked; i++)
-                {
+                for (int i = 0; i < MAX_RETRIES && !acked; i++) {
                     sendMessage(data);
-                    System.out.println("[CLIENT] Message sent [Type = DATA, SeqNum = " + dataSequence + ", Payload = " + bytesRead + " bytes]");
+                    System.out.println("[CLIENT] Message sent [Type = DATA, SeqNum = " + sequenceNum +
+                                    ", Payload = " + bytesRead + " bytes]");
 
-                    if (waitAck(dataSequence))
-                    {
+                    if (waitAck(sequenceNum)) {
                         acked = true;
-                    }
-                    else
-                    {
-                        System.out.println("[CLIENT] Retrying SeqNum = " + dataSequence + " (attempt " + (i + 1) + "/" + MAX_RETRIES + ")");
+                    } else {
+                        System.out.println("[CLIENT] Retrying SeqNum = " + sequenceNum +
+                                        " (attempt " + (i + 1) + "/" + MAX_RETRIES + ")");
                     }
                 }
 
-                if(!acked)
-                {
-                    System.out.println(Colors.red("[CLIENT] Failed to send DATA SeqNum = " + dataSequence + ". Upload aborted"));
+                if (!acked) {
+                    System.out.println(Colors.red("[CLIENT] Failed to send DATA SeqNum = "
+                                                + sequenceNum + ". Upload aborted"));
                     return false;
                 }
 
-                dataSequence++;
+                sequenceNum++;  
             }
 
-            Message fin = new Message(Message.FIN, dataSequence);
+            Message fin = new Message(Message.FIN, sequenceNum);
             boolean complete = false;
-
-            for(int i = 0; i < MAX_RETRIES && !complete; i++)
-            {
+            for (int i = 0; i < MAX_RETRIES && !complete; i++) {
                 sendMessage(fin);
-                System.out.println("[CLIENT] Message sent [Type = FIN, SeqNum = " + dataSequence + "]");
+                System.out.println("[CLIENT] Message sent [Type = FIN, SeqNum = " + sequenceNum + "]");
 
-                try
-                {
+                try {
                     Message response = receiveMessage();
-
-                    if(response.getMessageType() == Message.FIN_ACK)
-                    {
+                    if (response.getMessageType() == Message.FIN_ACK) {
                         System.out.println("Received FIN_ACK for SeqNum = " + response.getSequenceNum());
                         complete = true;
                     }
-                }
-                catch (SocketTimeoutException e)
-                {
-                    System.out.println("Timeout waiting for FIN_ACK, retrying (" + (i + 1) + "/" + MAX_RETRIES + ")");
+                } catch (SocketTimeoutException e) {
+                    System.out.println("Timeout waiting for FIN_ACK, retrying (" +
+                                    (i + 1) + "/" + MAX_RETRIES + ")");
                 }
             }
 
-            if(complete)
-            {
+            if (complete) {
                 System.out.println(Colors.green("File Uploaded Successfully -> '" + remoteFilename + "'"));
-                System.out.println("Total packet sent: " + (dataSequence - (sequenceNum - 1)));
                 System.out.println(Colors.green("FILE UPLOADED SUCCESSFULLY"));
                 return true;
-            }
-            else 
-            {
+            } else {
                 System.out.println(Colors.red("Upload FIN not acknowledged. Transfer may be incomplete."));
                 return false;
             }
+
+        } finally {
+            if (fis != null) fis.close();
         }
-        finally
-        {
-            if (fis != null)
-            {
-                fis.close();
-            }
-        }
+
     }
 
     /**

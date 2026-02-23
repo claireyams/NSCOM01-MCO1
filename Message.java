@@ -29,7 +29,13 @@ import java.util.Arrays;
 
 public class Message implements Serializable
 {
-    /** Full constructor with payload. */
+    /**
+     * Full constructor for messages that carry a payload.
+     *
+     * @param mtype  one of the message-type constants defined in this class
+     * @param snum   sequence number for this message
+     * @param pload  payload bytes, or null for control messages
+     */
     public Message(byte mtype, int snum, byte[] pload)
     {
         messageType = mtype;
@@ -46,7 +52,13 @@ public class Message implements Serializable
         }
     }
 
-    /** Convenience constructor for control messages with no payload. */
+    /**
+     * Convenience constructor for control messages that carry no payload
+     * (SYN, SYN_ACK, ACK, FIN, FIN_ACK).
+     *
+     * @param mtype  one of the message-type constants defined in this class
+     * @param snum   sequence number for this message
+     */
     public Message(byte mtype, int snum)
     {
         this(mtype, snum, null);
@@ -54,7 +66,10 @@ public class Message implements Serializable
 
     /**
      * Computes a SHA-256 hash of the given data for per-packet integrity checking.
-     * Returns the hash of an empty byte array if data is null.
+     * If data is null the hash of an empty byte array is returned.
+     *
+     * @param data  bytes to hash (may be null)
+     * @return      32-byte SHA-256 digest
      */
     private static byte[] computeHash(byte[] data)
     {
@@ -154,7 +169,11 @@ public class Message implements Serializable
         return new Message(messageType, sequenceNum, payload);
     }
 
-    /** Returns the message type as a human-readable string. */
+    /**
+     * Returns the message type as a human-readable string (e.g. "SYN_ACK").
+     *
+     * @return message type name
+     */
     public String msgTypeString()
     {
         switch(messageType)

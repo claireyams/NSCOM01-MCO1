@@ -31,10 +31,13 @@ public class Client
     }
 
     /**
-     * Creates a Client bound to the given local port.
-     * The initial SeqNum (ISN) is fixed at 1 for reproducibility.
+     * Creates a Client bound to the given local port and ensures that
+     * {@value #CLIENT_FOLDER} exists on the local file system.
+     *
+     * The initial Sequence Number (ISN) starts at 0.
+     *
      * @param clientPort  local UDP port to bind to
-     * @throws SocketException if the socket cannot be created
+     * @throws SocketException if the DatagramSocket cannot be created
      */
     public Client(int clientPort) throws SocketException
     {
@@ -43,7 +46,14 @@ public class Client
         state = ClientState.CLOSED;
         sequenceNum = 0;
 
-        System.out.println("[CLIENT] Port Number = " + clientPort + " | Initial SeqNum: " + sequenceNum);
+        File folder = new File(CLIENT_FOLDER);
+        if(!folder.exists())
+        {
+            folder.mkdirs();
+            System.out.println("[CLIENT] Created directory: " + CLIENT_FOLDER + "/");
+        }
+
+        System.out.println("[CLIENT] Port Number = " + clientPort + " | File Directory = " + CLIENT_FOLDER + "/ |Initial SeqNum = " + sequenceNum);
     }
 
     /**
@@ -60,6 +70,7 @@ public class Client
      * @param serverHost  hostname or IP of the server
      * @param serverPort  UDP port the server is listening on
      * @return true if connection was established, false otherwise
+     * @throws IOException if a network error occurs
      */
     public boolean connect(String serverHost, int serverPort) throws IOException 
     {
@@ -123,6 +134,9 @@ public class Client
 
     /**
      * Serializes and sends a Message to the server.
+     * 
+     * @param message  the Message to transmit
+     * @throws IOException if the underlying socket send fails
      */
     private void sendMessage(Message message) throws IOException
     {
@@ -135,6 +149,10 @@ public class Client
     /**
      * Blocks until a UDP datagram arrives from the server, then parses it.
      * Throws SocketTimeoutException if no packet arrives within TIMEOUT ms.
+     * 
+     * @return the received and decrypted Message
+     * @throws IOException            if a network error occurs
+     * @throws SocketTimeoutException if no packet arrives within TIMEOUT ms
      */
     private Message receiveMessage() throws IOException
     {
@@ -147,8 +165,11 @@ public class Client
     }
 
     /**
-     * Waits for an ACK with the specified SeqNum.
-     * Returns true if the expected ACK is received, false on wrong ACK or timeout.
+     * Waits for a single ACK message with the expected sequence number.
+     *
+     * @param expectedSeq  the sequence number the ACK must carry
+     * @return true if the correct ACK arrived; false otherwise
+     * @throws IOException if a network error occurs (SocketTimeoutException is caught internally)
      */
     private boolean waitAck(int expectedSeq) throws IOException
     {
@@ -174,6 +195,13 @@ public class Client
         return false;
     }
 
+    /**
+     * Retransmits a message up to MAX_RETRIES times until the expected ACK is received.
+     *
+     * @param message     the Message to (re)send
+     * @param expectedAck the sequence number of the ACK to wait for
+     * @throws IOException if all retransmission attempts fail
+     */
     private void retransmitMessage(Message message, int expectedAck) throws IOException
     {
         for(int i = 0; i < MAX_RETRIES; i++)
@@ -198,14 +226,19 @@ public class Client
     /**
      * Writes a list of byte chunks to a file in order.
      * Used to reassemble a received file after all chunks are collected.
+     * 
+     * @param chunks    ordered list of raw file data chunks received from the server
+     * @param filename  bare filename to create inside the client folder
+     * @throws IOException if the file cannot be written
      */
     private void writeChunksToFile(List<byte[]> chunks, String filename) throws IOException
     {
+        File dest = new File(CLIENT_FOLDER, filename);
         FileOutputStream fos = null;
 
         try 
         {
-            fos = new FileOutputStream(filename);
+            fos = new FileOutputStream(dest);
             
             for(int i = 0; i < chunks.size(); i++)
             {
@@ -220,10 +253,73 @@ public class Client
                 fos.close();
             }
         }
+        System.out.println("[CLIENT] File saved to: " + dest.getPath());
+    }
+
+    public List<String> showClientFiles()
+    {
+        System.out.println("Files on Client");
+
+        File folder = new File(CLIENT_FOLDER);
+        List<String> files = new ArrayList<>();
+
+        File[] list = folder.listFiles();
+
+        if(list != null)
+            for(File f : list)
+                if(f.isFile())
+                    files.add(f.getName());
+
+        if(files.isEmpty())
+            System.out.println("No files available.");
+        else
+            for(String name : files)
+                System.out.println("- " + name);
+
+        return files;
+    }
+
+    private List<String> getServerFileList() throws IOException
+    {
+        Message listRequest = new Message(Message.DATA, sequenceNum, "LIST".getBytes());
+        sendMessage(listRequest);
+
+        Message response = receiveMessage();
+        List<String> files = new ArrayList<>();
+
+        if(response.getMessageType() == Message.DATA)
+        {
+            String data = new String(response.getPayload());
+            String[] names = data.split("\n");
+
+            for(String name : names)
+                if(!name.trim().isEmpty())
+                    files.add(name.trim());
+        }
+
+        return files;
+    }
+
+    public List<String> showServerFiles() throws IOException
+    {
+        System.out.println("Files on Server:");
+
+        List<String> serverFiles = getServerFileList();
+
+        if(serverFiles.isEmpty())
+        {
+            System.out.println("No files available.");
+            return serverFiles;
+        }
+
+        for(String name : serverFiles)
+            System.out.println("- " + name);
+
+        return serverFiles;
     }
 
     /**
-     * Downloads a file from the server and saves it locally.
+     * Downloads a file from the server and saves it locally to CLIENT_FOLDER.
      *
      * Protocol flow:
      *   1. Client sends DATA(sequenceNum, filename) as a download request.
@@ -233,8 +329,9 @@ public class Client
      *   5. Client reassembles chunks and writes the file.
      *
      * @param remoteFilename  filename to request from the server
-     * @param localFilename   local path to save the downloaded file
+     * @param localFilename   local path to save the downloaded file inside CLIENT_fOLDER
      * @return true if the file was downloaded successfully, false otherwise
+     * @throws IOException if a network or file-system error occurs
      */
     public boolean downloadFile(String remoteFilename, String localFilename) throws IOException
     {
@@ -245,7 +342,7 @@ public class Client
         }
 
         System.out.println(Colors.cyan("\n===== Starting File Download ====="));
-        System.out.println("Remote: " + remoteFilename + "  ->  Local: " + localFilename);
+        System.out.println("Remote: " + remoteFilename + "  ->  Local: " + CLIENT_FOLDER + "/" + localFilename);
 
         // send read request to server
         Message readRequest = new Message(Message.DATA, sequenceNum, remoteFilename.getBytes());
@@ -320,7 +417,6 @@ public class Client
         if(complete)
         {
             writeChunksToFile(receivedChunks, localFilename);
-            System.out.println("File Downloaded Successfully -> '" + localFilename + "'");
             System.out.println("Total packet received: " + receivedChunks.size());
             System.out.println(Colors.green("FILE DOWNLOAD COMPLETE"));
 
@@ -330,6 +426,20 @@ public class Client
         return false; 
     }
 
+    /**
+     * Uploads a local file from CLIENT_FOLDER to the server.
+     *
+     * Protocol flow:
+     *  1. Client sends DATA(seq, remoteFilename) as the filename handshake.
+     *  2. Server replies with ACK.
+     *  3. Client sends file data in stop-and-wait chunks, waiting for ACK after each.
+     *  4. After the last chunk is acknowledged, client sends FIN and waits for FIN_ACK.
+     *
+     * @param localFilename   bare filename inside CLIENT_FOLDER to upload
+     * @param remoteFilename  filename to save as on the server
+     * @return true if the file was uploaded successfully
+     * @throws IOException if a network or file-system error occurs
+     */
     public boolean uploadFile(String localFilename, String remoteFilename) throws IOException
     {
         if(state != ClientState.ESTABLISHED)
@@ -339,12 +449,12 @@ public class Client
         }
 
         System.out.println(Colors.cyan("\n===== Starting File Upload ====="));
-        System.out.println("Local: " + localFilename + "  ->   Remote: " + remoteFilename);
+        System.out.println("Local: " + CLIENT_FOLDER + "/" + localFilename + "  ->   Remote: " + remoteFilename);
 
-        File file = new File(localFilename);
+        File file = new File(CLIENT_FOLDER, localFilename);
         if(!file.exists())
         {
-            System.out.println(Colors.red("Error: File not found."));
+            System.out.println(Colors.red("Error: File not found in " + CLIENT_FOLDER + "/"));
             return false;
         }
 
@@ -366,7 +476,8 @@ public class Client
             byte[] buffer = new byte[MAX_PAYLOAD_SIZE];
             int bytesRead;
 
-            while ((bytesRead = fis.read(buffer)) != -1) {
+            while ((bytesRead = fis.read(buffer)) != -1) 
+            {
                 byte[] payload = Arrays.copyOf(buffer, bytesRead);  
                 Message data = new Message(Message.DATA, sequenceNum, payload);
                 boolean acked = false;
@@ -376,26 +487,29 @@ public class Client
                     System.out.println("[CLIENT] Message sent [Type = DATA, SeqNum = " + sequenceNum +
                                     ", Payload = " + bytesRead + " bytes]");
 
-                    if (waitAck(sequenceNum)) {
+                    if (waitAck(sequenceNum)) 
+                    {
                         acked = true;
-                    } else {
-                        System.out.println("[CLIENT] Retrying SeqNum = " + sequenceNum +
-                                        " (attempt " + (i + 1) + "/" + MAX_RETRIES + ")");
+                    } 
+                    else 
+                    {
+                        System.out.println("[CLIENT] Retrying SeqNum = " + sequenceNum + " (attempt " + (i + 1) + "/" + MAX_RETRIES + ")");
                     }
                 }
 
-                if (!acked) {
-                    System.out.println(Colors.red("[CLIENT] Failed to send DATA SeqNum = "
-                                                + sequenceNum + ". Upload aborted"));
+                if (!acked) 
+                {
+                    System.out.println(Colors.red("[CLIENT] Failed to send DATA SeqNum = " + sequenceNum + ". Upload aborted"));
                     return false;
                 }
-
                 sequenceNum++;  
             }
 
             Message fin = new Message(Message.FIN, sequenceNum);
             boolean complete = false;
-            for (int i = 0; i < MAX_RETRIES && !complete; i++) {
+
+            for (int i = 0; i < MAX_RETRIES && !complete; i++) 
+            {
                 sendMessage(fin);
                 System.out.println("[CLIENT] Message sent [Type = FIN, SeqNum = " + sequenceNum + "]");
 
@@ -406,14 +520,12 @@ public class Client
                         complete = true;
                     }
                 } catch (SocketTimeoutException e) {
-                    System.out.println("Timeout waiting for FIN_ACK, retrying (" +
-                                    (i + 1) + "/" + MAX_RETRIES + ")");
+                    System.out.println("Timeout waiting for FIN_ACK, retrying (" + (i + 1) + "/" + MAX_RETRIES + ")");
                 }
             }
 
             if (complete) {
-                System.out.println(Colors.green("File Uploaded Successfully -> '" + remoteFilename + "'"));
-                System.out.println(Colors.green("FILE UPLOADED SUCCESSFULLY"));
+                System.out.println(Colors.green("FILE UPLOADED SUCCESSFULLY -> ServerFolder/" + remoteFilename));
                 return true;
             } else {
                 System.out.println(Colors.red("Upload FIN not acknowledged. Transfer may be incomplete."));
@@ -479,6 +591,16 @@ public class Client
         }
     }
 
+    /**
+     * Application entry point.
+     *
+     * Prompts the user for connection details, then presents an interactive menu:
+     * [1] Download File – lists server files, user picks one to download
+     * [2] Upload File   – lists client files, user picks one to upload
+     * [X] Disconnect
+     *
+     * @param args  command-line arguments (not used)
+     */
     public static void main (String[] args)
     {
         System.out.println(Colors.cyan("===== Starting CLIENT program ====="));
@@ -527,18 +649,30 @@ public class Client
                 {
                     case "1":
                         System.out.println(Colors.cyan("\n===== Download File ====="));
+
+                        List<String> files = client.showServerFiles();
+                        if(files.isEmpty())
+                            break;
+
                         System.out.print("Enter remote filename (on server): ");
                         String remoteFile = scanner.nextLine().trim();
                         System.out.print("Enter local filename to save as: ");
                         String localFile = scanner.nextLine().trim();
+
                         client.downloadFile(remoteFile, localFile);
                         break;
                     case "2":
                         System.out.println(Colors.cyan("\n===== Upload File ====="));
+                        
+                        List<String> localFiles = client.showClientFiles();
+                        if(localFiles.isEmpty())
+                            break;
+
                         System.out.print("Enter local filename to upload: ");
                         String localUpload = scanner.nextLine().trim();
                         System.out.print("Enter remote filename to save as: ");
                         String remoteUpload = scanner.nextLine().trim();
+
                         client.uploadFile(localUpload, remoteUpload);
                         break;
                     case "X":
@@ -579,4 +713,7 @@ public class Client
     private static final int MAX_RETRIES = 3;
     private static final int BUFFER_SIZE = 4096;
     private static final int MAX_PAYLOAD_SIZE = 1000;
+
+    /** dedicated directory where all client-side files are stored/saved */
+    private static final String CLIENT_FOLDER = "ClientFolder";
 }

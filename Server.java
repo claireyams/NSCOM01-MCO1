@@ -7,6 +7,11 @@ import java.util.*;
 /**
  *  The class Server represents the server in the reliable data transfer protocol over UDP.
  * 
+ *  All files managed by the server are stored inside a dedicated SERVER_FOLDER
+ *  directory that is created automatically on first run. This makes it easy to verify
+ *  that uploads and downloads are reaching the correct endpoint even when both client
+ *  and server run on the same machine.
+ * 
  *  @author Sky Hannah Parado
  *  @author Rhian Claire Yamsuan
  *  @version 1.0
@@ -37,6 +42,8 @@ public class Server
     private static final int BUFFER_SIZE = 4096;
     private static final int MAX_PAYLOAD_SIZE = 1000;
 
+    private static final String SERVER_FOLDER = "ServerFolder";
+
     /**
      * Creates a Server bound to the given port.
      * @param serverPort  UDP port to listen on
@@ -48,9 +55,22 @@ public class Server
         UDPsocket.setSoTimeout(TIMEOUT);
         state = ServerState.LISTEN;
 
-        System.out.println("Server listening on port: " + serverPort);
+        File folder = new File(SERVER_FOLDER);
+        if (!folder.exists())
+        {
+            folder.mkdirs();
+            System.out.println("[SERVER] Created directory: " + SERVER_FOLDER + "/");
+        }
+
+        System.out.println("[SERVER] Listening on port: " + serverPort + " | File Directory = " + SERVER_FOLDER + "/");
     }
 
+    /**
+     * Serializes, encrypts, and sends a Message to the current client.
+     *
+     * @param message  the Message to transmit
+     * @throws IOException if the underlying socket send fails
+     */
     private void sendMessage(Message message) throws IOException
     {
         byte[] data = message.convertToBytes();
@@ -59,6 +79,15 @@ public class Server
         UDPsocket.send(packet);
     }
 
+    /**
+     * Blocks until a UDP datagram arrives, then decrypts and parses it into a
+     * Message. Also records the sender's address and port so that
+     * sendMessage() can reply to the correct client.
+     *
+     * @return the received and decrypted Message
+     * @throws IOException            if a network error occurs
+     * @throws SocketTimeoutException if no packet arrives within TIMEOUT ms
+     */
     private Message receiveMessage() throws IOException
     {
         byte[] buffer = new byte[BUFFER_SIZE];
@@ -76,6 +105,8 @@ public class Server
      * Starts the server's main event loop.
      * The server runs indefinitely, accepting one client at a time.
      * After a session ends, it returns to LISTEN state for the next client.
+     * 
+     * @throws IOException if an unrecoverable network error occurs
      */
     public void start() throws IOException
     {
@@ -127,22 +158,32 @@ public class Server
             else if (state == ServerState.ESTABLISHED && msg.getMessageType() == Message.DATA)
             {
                 String payload = new String(msg.getPayload()).trim();
-                File f = new File(payload);
 
-                // If the requested file exists on server → it's a download request
-                if (f.exists()) {
-                    handleDownloadRequest(msg);
-                } else {
-                    // Otherwise, it’s a new file coming from client → upload
-                    Message uploadStart = new Message(
-                        Message.DATA,
-                        msg.getSequenceNum(),
-                        ("UPLOAD:" + payload).getBytes()
-                    );
-                    handleUploadRequest(uploadStart);
+                if(payload.equals("LIST"))
+                {
+                    String[] files = listServerFiles();
+                    String fileList = String.join("\n", files);
+                    Message response = new Message(Message.DATA, msg.getSequenceNum(), fileList.getBytes());
+                    sendMessage(response);
+                    System.out.println("[SERVER] Sent file list to client.");
+                }
+                else 
+                {
+                    File f = new File(SERVER_FOLDER, payload);
+                    // If the requested file exists on server → it's a download request
+                    if (f.exists()) {
+                        handleDownloadRequest(msg);
+                    } else {
+                        // Otherwise, it’s a new file coming from client → upload
+                        Message uploadStart = new Message(
+                            Message.DATA,
+                            msg.getSequenceNum(),
+                            ("UPLOAD:" + payload).getBytes()
+                        );
+                        handleUploadRequest(uploadStart);
+                    }
                 }
             }
-
             else if (state == ServerState.ESTABLISHED && msg.getMessageType() == Message.FIN)
             {
                 System.out.println("Received FIN, SeqNum = " + msg.getSequenceNum());
@@ -159,6 +200,19 @@ public class Server
                 System.out.println(Colors.green("CONNECTION CLOSED  "));
             }
         }
+    }
+
+    private String[] listServerFiles()
+    {
+        File folder = new File(SERVER_FOLDER);
+        String[] files = folder.list();
+
+        if(files == null || files.length == 0)
+        {
+            return new String[0];
+        }
+
+        return files;
     }
 
     /**
@@ -178,7 +232,7 @@ public class Server
         System.out.println(Colors.cyan("\n===== Handling Download Request ====="));
 
         String filename = new String(request.getPayload()).trim();
-        File file = new File(filename);
+        File file = new File(SERVER_FOLDER, filename);
 
         if (!file.exists())
         {
@@ -202,7 +256,6 @@ public class Server
             int bytesRead;
             int seq = request.getSequenceNum();
 
-            
             while ((bytesRead = fis.read(buffer)) != -1)
             {
                 byte[] payload = Arrays.copyOf(buffer, bytesRead);
@@ -248,11 +301,18 @@ public class Server
             sendMessage(fin);
             System.out.println("[SERVER] Message sent [Type = FIN, SeqNum = "+ seq + "]");
 
-            Message response = receiveMessage();
-            if(response.getMessageType() == Message.FIN_ACK)
+            try
             {
-                System.out.println("Received FIN_ACK for SeqNum = " + response.getSequenceNum());
+                Message response = receiveMessage();
+                if (response.getMessageType() == Message.FIN_ACK)
+                    System.out.println("Received FIN_ACK for SeqNum = " + response.getSequenceNum());
             }
+            catch (SocketTimeoutException e)
+            {
+                System.out.println(Colors.yellow("Timeout waiting for FIN_ACK."));
+            }
+
+            System.out.println(Colors.green("[SERVER] Download complete for '" + filename + "'"));
         }
         finally
         {
@@ -263,71 +323,103 @@ public class Server
         }
     }
 
+    /**
+     * Handles a file upload from the client and stores it in SERVER_FOLDER.
+     *
+     * Protocol flow:
+     * 1. Request message payload must begin with "UPLOAD:" followed by the target filename.
+     * 2. Server sends ACK for the filename message.
+     * 3. Server receives DATA chunks in order, writing each to disk and
+     *    sending ACK; duplicate / out-of-order chunks get a duplicate ACK.
+     * 4. On receipt of FIN the server sends FIN_ACK and closes the file.
+     *
+     * @param request  the DATA message carrying "UPLOAD:<filename>"
+     * @throws IOException if a network or file-system error occurs
+     */
     private void handleUploadRequest(Message request) throws IOException
-{
-    System.out.println(Colors.cyan("\n===== Handling Upload Request ====="));
-    
-    String payload = new String(request.getPayload()).trim();
-    if (!payload.startsWith("UPLOAD:")) {
-        Message error = new Message(Message.ERROR, request.getSequenceNum(),
-                "Invalid upload request format".getBytes());
-        sendMessage(error);
-        return;
-    }
-    String filename = payload.substring(7);
-    File file = new File(filename);
-    System.out.println("[SERVER] Preparing to receive file: " + filename);
-    Message ack = new Message(Message.ACK, request.getSequenceNum());
-    sendMessage(ack);
-    System.out.println("[SERVER] ACK sent, ready to receive: SeqNum = " + request.getSequenceNum() + "]");
-    FileOutputStream fos = null;
-    try {
-        fos = new FileOutputStream(file);
-        int expectedSeq = request.getSequenceNum() + 1;
-        boolean receiving = true;
-        while (receiving) {
-            try {
-                Message msg = receiveMessage();
-                if (msg.getMessageType() == Message.DATA) {
-                    if (msg.getSequenceNum() == expectedSeq) {
-                        fos.write(msg.getPayload());
-                        fos.flush();
-                        System.out.println("[SERVER] Received chunk SeqNum = " + msg.getSequenceNum()
-                                + " (" + msg.getPayload().length + " bytes)");
-                        Message ackData = new Message(Message.ACK, msg.getSequenceNum());
-                        sendMessage(ackData);
+    {
+        System.out.println(Colors.cyan("\n===== Handling Upload Request ====="));
+        
+        String payload = new String(request.getPayload()).trim();
+        if (!payload.startsWith("UPLOAD:")) {
+            Message error = new Message(Message.ERROR, request.getSequenceNum(),
+                    "Invalid upload request format".getBytes());
+            sendMessage(error);
+            return;
+        }
+
+        String filename = payload.substring(7);
+        File file = new File(SERVER_FOLDER, filename);
+        System.out.println("[SERVER] Preparing to receive file: " + filename);
+        System.out.println("[SERVER] Will save to: " + file.getPath());
+
+        Message ack = new Message(Message.ACK, request.getSequenceNum());
+        sendMessage(ack);
+        System.out.println("[SERVER] Message sent [Type = ACK, SeqNum = "+ request.getSequenceNum() + "]");
+        
+        FileOutputStream fos = null;
+
+        try {
+            fos = new FileOutputStream(file);
+            int expectedSeq = request.getSequenceNum() + 1;
+            boolean receiving = true;
+            while (receiving) {
+                try {
+                    Message msg = receiveMessage();
+                    if (msg.getMessageType() == Message.DATA) {
+                        if (msg.getSequenceNum() == expectedSeq) {
+                            fos.write(msg.getPayload());
+                            fos.flush();
+                            System.out.println("Received chunk SeqNum = " + msg.getSequenceNum()
+                                    + " (" + msg.getPayload().length + " bytes)");
+                            Message ackData = new Message(Message.ACK, msg.getSequenceNum());
+                            sendMessage(ackData);
+                            System.out.println("[SERVER] Message sent [Type = ACK, SeqNum = "+ msg.getSequenceNum() + "]");
+                            expectedSeq++;
+                        } else {
+                            // If out of order, resend last ACK
+                            System.out.println(Colors.yellow("[SERVER] Out of order. Expected SeqNum = " + expectedSeq));
+                            Message dupAck = new Message(Message.ACK, expectedSeq - 1);
+                            sendMessage(dupAck);
+                        }
+                    }
+                    else if (msg.getMessageType() == Message.FIN) {
+                        System.out.println("Received FIN_ACK for SeqNum = " + msg.getSequenceNum());
+                        Message finAck = new Message(Message.FIN_ACK, msg.getSequenceNum());
+                        sendMessage(finAck);
+                        System.out.println("[SERVER] Message sent [Type = FIN_ACK, SeqNum = "+ msg.getSequenceNum() + "]");
+                        
                         expectedSeq++;
-                    } else {
-                        // If out of order, resend last ACK
-                        System.out.println(Colors.yellow("[SERVER] Out of order. Expected SeqNum = " + expectedSeq));
-                        Message dupAck = new Message(Message.ACK, expectedSeq - 1);
-                        sendMessage(dupAck);
+                        receiving = false;
+                        System.out.println(Colors.green("[SERVER] Upload complete for '" + file.getPath() + "'"));
                     }
                 }
-                else if (msg.getMessageType() == Message.FIN) {
-                    System.out.println("Received FIN, sending FIN_ACK...");
-                    Message finAck = new Message(Message.FIN_ACK, msg.getSequenceNum());
-                    sendMessage(finAck);
-                    receiving = false;
-                    System.out.println(Colors.green("[SERVER] Upload complete for '" + filename + "'"));
+                catch (SocketTimeoutException e) {
+                    System.out.println(Colors.yellow("[SERVER] Waiting for more upload data..."));
                 }
             }
-            catch (SocketTimeoutException e) {
-                System.out.println(Colors.yellow("[SERVER] Waiting for more upload data..."));
-            }
+        }
+        finally {
+            if (fos != null) fos.close();
         }
     }
-    finally {
-        if (fos != null) fos.close();
-    }
-}
 
+    /**
+     * Closes the underlying UDP socket and releases all system resources.
+     * Safe to call even if the socket is already closed or was never opened.
+     */
     public void close()
     {
         if (UDPsocket != null && !UDPsocket.isClosed())
             UDPsocket.close();
     }
 
+    /**
+     * Application entry point. Prompts for a port number, then starts the
+     * server loop.  Cleans up the socket in a finally block.
+     *
+     * @param args  command-line arguments (not used)
+     */
     public static void main(String[] args)
     {
         System.out.println(Colors.cyan("===== Starting SERVER program ====="));

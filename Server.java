@@ -126,8 +126,23 @@ public class Server
             }
             else if (state == ServerState.ESTABLISHED && msg.getMessageType() == Message.DATA)
             {
-                handleDownloadRequest(msg);
+                String payload = new String(msg.getPayload()).trim();
+                File f = new File(payload);
+
+                // If the requested file exists on server → it's a download request
+                if (f.exists()) {
+                    handleDownloadRequest(msg);
+                } else {
+                    // Otherwise, it’s a new file coming from client → upload
+                    Message uploadStart = new Message(
+                        Message.DATA,
+                        msg.getSequenceNum(),
+                        ("UPLOAD:" + payload).getBytes()
+                    );
+                    handleUploadRequest(uploadStart);
+                }
             }
+
             else if (state == ServerState.ESTABLISHED && msg.getMessageType() == Message.FIN)
             {
                 System.out.println("Received FIN, SeqNum = " + msg.getSequenceNum());
@@ -247,6 +262,65 @@ public class Server
             }
         }
     }
+
+    private void handleUploadRequest(Message request) throws IOException
+{
+    System.out.println(Colors.cyan("\n===== Handling Upload Request ====="));
+    
+    String payload = new String(request.getPayload()).trim();
+    if (!payload.startsWith("UPLOAD:")) {
+        Message error = new Message(Message.ERROR, request.getSequenceNum(),
+                "Invalid upload request format".getBytes());
+        sendMessage(error);
+        return;
+    }
+    String filename = payload.substring(7);
+    File file = new File(filename);
+    System.out.println("[SERVER] Preparing to receive file: " + filename);
+    Message ack = new Message(Message.ACK, request.getSequenceNum());
+    sendMessage(ack);
+    System.out.println("[SERVER] ACK sent, ready to receive: SeqNum = " + request.getSequenceNum() + "]");
+    FileOutputStream fos = null;
+    try {
+        fos = new FileOutputStream(file);
+        int expectedSeq = request.getSequenceNum() + 1;
+        boolean receiving = true;
+        while (receiving) {
+            try {
+                Message msg = receiveMessage();
+                if (msg.getMessageType() == Message.DATA) {
+                    if (msg.getSequenceNum() == expectedSeq) {
+                        fos.write(msg.getPayload());
+                        fos.flush();
+                        System.out.println("[SERVER] Received chunk SeqNum = " + msg.getSequenceNum()
+                                + " (" + msg.getPayload().length + " bytes)");
+                        Message ackData = new Message(Message.ACK, msg.getSequenceNum());
+                        sendMessage(ackData);
+                        expectedSeq++;
+                    } else {
+                        // If out of order, resend last ACK
+                        System.out.println(Colors.yellow("[SERVER] Out of order. Expected SeqNum = " + expectedSeq));
+                        Message dupAck = new Message(Message.ACK, expectedSeq - 1);
+                        sendMessage(dupAck);
+                    }
+                }
+                else if (msg.getMessageType() == Message.FIN) {
+                    System.out.println("Received FIN, sending FIN_ACK...");
+                    Message finAck = new Message(Message.FIN_ACK, msg.getSequenceNum());
+                    sendMessage(finAck);
+                    receiving = false;
+                    System.out.println(Colors.green("[SERVER] Upload complete for '" + filename + "'"));
+                }
+            }
+            catch (SocketTimeoutException e) {
+                System.out.println(Colors.yellow("[SERVER] Waiting for more upload data..."));
+            }
+        }
+    }
+    finally {
+        if (fos != null) fos.close();
+    }
+}
 
     public void close()
     {

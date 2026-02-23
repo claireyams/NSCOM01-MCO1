@@ -607,47 +607,87 @@ public class Client
         Scanner scanner = new Scanner(System.in);
         Client client = null;
 
-        try 
-        {
+        int clientPort = 0, serverPort = 0;
+
+        while (true) {
+
             System.out.print("Enter client port: ");
-            int clientPort = scanner.nextInt();
-            scanner.nextLine();
+
+            try {
+
+                clientPort = Integer.parseInt(scanner.nextLine().trim());
+
+                if (clientPort <= 0 || clientPort > 65535) {
+                    System.out.println(Colors.red("Invalid port number. Please enter 1–65535."));
+                    continue;
+                }
+
+                break;
+
+            } catch (NumberFormatException e) {
+
+                System.out.println(Colors.red("Invalid input. Please enter a valid number for port."));
+
+            }
+        }
+
+        try {
 
             client = new Client(clientPort);
 
-            System.out.print("Enter server host (localhost): ");
-            String serverHost = scanner.nextLine();
-            
-            if(serverHost.isEmpty())
-            {
-                serverHost = "localhost";
-            }
+        } catch (Exception e) {
+
+            System.out.println(Colors.red("Failed to initialize client socket: " + e.getMessage()));
+            return;
+
+        }
+
+        System.out.print("Enter server host (localhost): ");
+        String serverHost = scanner.nextLine().trim();
+
+        if (serverHost.isEmpty()) serverHost = "localhost";
+
+        while (true) {
 
             System.out.print("Enter server port: ");
-            int serverPort = scanner.nextInt();
-            scanner.nextLine();
+            try {
 
-            if(!client.connect(serverHost, serverPort))
-            {
+                serverPort = Integer.parseInt(scanner.nextLine().trim());
+                if (serverPort <= 0 || serverPort > 65535) {
+
+                    System.out.println(Colors.red("Invalid port number. Please enter 1–65535."));
+                    continue;
+                }
+                break;
+
+            } catch (NumberFormatException e) {
+
+                System.out.println(Colors.red("Invalid input. Please enter a valid number for port."));
+            }
+        }
+
+        try {
+            if (!client.connect(serverHost, serverPort)) {
+
                 System.out.println(Colors.red("Failed to establish connection to server."));
                 return;
             }
 
             boolean flag = false;
 
-            while(!flag)
-            {
+            while (!flag) {
+
                 System.out.println(Colors.cyan("\n===== File Transfer Functionality ====="));
                 System.out.println("[1] Download File");
                 System.out.println("[2] Upload File");
                 System.out.println("[X] Disconnect");
                 System.out.print("Choose option: ");
 
-                String choice = scanner.nextLine();
+                String choice = scanner.nextLine().trim();
 
-                switch(choice)
-                {
+                switch (choice) {
                     case "1":
+
                         System.out.println(Colors.cyan("\n===== Download File ====="));
 
                         List<String> files = client.showServerFiles();
@@ -659,9 +699,16 @@ public class Client
                         System.out.print("Enter local filename to save as: ");
                         String localFile = scanner.nextLine().trim();
 
-                        client.downloadFile(remoteFile, localFile);
+                        if (!remoteFile.isEmpty() && !localFile.isEmpty())
+                            client.downloadFile(remoteFile, localFile);
+
+                        else
+                            System.out.println(Colors.red("Filename cannot be empty."));
+
                         break;
+
                     case "2":
+
                         System.out.println(Colors.cyan("\n===== Upload File ====="));
                         
                         List<String> localFiles = client.showClientFiles();
@@ -673,32 +720,44 @@ public class Client
                         System.out.print("Enter remote filename to save as: ");
                         String remoteUpload = scanner.nextLine().trim();
 
-                        client.uploadFile(localUpload, remoteUpload);
+                        if (!localUpload.isEmpty() && !remoteUpload.isEmpty())
+                            client.uploadFile(localUpload, remoteUpload);
+
+                        else
+                            System.out.println(Colors.red("Filename cannot be empty."));
+
                         break;
+
                     case "X":
                     case "x":
+
                         flag = true;
                         break;
-                    default: System.out.println("Invalid option. Please choose 1, 2, or X.");
+                    default:
+
+                        System.out.println(Colors.yellow("Invalid option. Please choose 1, 2, or X."));
                 }
             }
 
             client.disconnect();
-        } 
-        catch (Exception e)
-        {
-            System.out.println(Colors.red("Error: " + e.toString()));
-            return;
+
+        } catch (UnknownHostException e) {
+
+        System.out.println(Colors.red("Invalid server hostname: " + e.getMessage()));
+        System.out.println(Colors.yellow("Please restart the client and enter a valid host (e.g., localhost or 127.0.0.1)."));
+    
+    } catch (Exception e) {
+
+        System.out.println(Colors.red("Error: " + e.getMessage()));
+    
+    } finally {
+
+        if (client != null) client.close();
+        scanner.close();
+
         }
-        finally
-        {
-            if(client != null)
-            {
-                client.close();
-            }
-            scanner.close();
-        }
-    }
+}
+
 
     /** fields */
     private DatagramSocket UDPsocket;

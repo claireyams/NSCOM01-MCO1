@@ -496,7 +496,7 @@ public class Server
 
             if (server != null) server.close();
             scanner.close();
-            
+
         }
     }
 }

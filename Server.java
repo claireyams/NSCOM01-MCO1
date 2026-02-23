@@ -181,7 +181,7 @@ public class Server
                         break;
 
                     } else {
-                        
+
                         System.out.println(Colors.green("Server will continue listening on port."));
                     }
                 }
@@ -361,29 +361,51 @@ public class Server
             UDPsocket.close();
     }
 
-    public static void main(String[] args)
-    {
+    public static void main(String[] args) {
+
         System.out.println(Colors.cyan("===== Starting SERVER program ====="));
         Scanner scanner = new Scanner(System.in);
-        System.out.print("Enter server port: ");
-        int port = scanner.nextInt();
+        int port = 0;
+        
+        while (true) {
+
+            System.out.print("Enter server port: ");
+
+            try {
+
+                port = Integer.parseInt(scanner.nextLine().trim());
+
+                if (port <= 0 || port > 65535) {
+                    System.out.println(Colors.red("Invalid port number. Please enter a value between 1-65535."));
+                    continue;
+                }
+
+                break;
+
+            } catch (NumberFormatException e) {
+
+                System.out.println(Colors.red("Invalid input. Please enter a valid number for port."));
+
+            }
+        }
 
         Server server = null;
 
-        try
-        {
+        try {
+
             server = new Server(port);
             server.start();
-        }
-        catch (Exception e)
-        {
+
+        } catch (Exception e) {
+
+            System.out.println(Colors.red("Error: " + e.getMessage()));
             e.printStackTrace();
-        }
-        finally
-        {
-            if (server != null)
-                server.close();
+
+        } finally {
+
+            if (server != null) server.close();
             scanner.close();
+            
         }
     }
 }

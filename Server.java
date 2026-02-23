@@ -77,86 +77,119 @@ public class Server
      * The server runs indefinitely, accepting one client at a time.
      * After a session ends, it returns to LISTEN state for the next client.
      */
-    public void start() throws IOException
-    {
-        int waitCounter = 0;
+    public void start() throws IOException {
 
-        while (true)
-        {
+        int waitCounter = 0;
+        Scanner prompt = new Scanner(System.in);
+
+        while (true) {
+
             Message msg = null;
 
-            try
-            {
+            try {
+
                 msg = receiveMessage();
                 waitCounter = 0;
-            }
-            catch (SocketTimeoutException e)
-            {
+
+            } catch (SocketTimeoutException e) {
+
                 waitCounter++;
-                
-                if(waitCounter % 6 == 1)
-                {
-                    System.out.println("[SERVER] Waiting for client...");
-                }
+                if (waitCounter % 6 == 1) System.out.println("[SERVER] Waiting for client...");
                 continue;
-            }   
 
-            if (state == ServerState.LISTEN && msg.getMessageType() == Message.SYN)
-            {
-                clientSeqBase = msg.getSequenceNum();
-                System.out.println("Received SYN, SeqNum = " + clientSeqBase);
+            } catch (SecurityException e) {
 
-                Message synAck = new Message(Message.SYN_ACK, clientSeqBase);
-                sendMessage(synAck);
+                System.out.println(Colors.red("[SERVER] Dropped corrupted packet: " + e.getMessage()));
+                continue;
 
-                System.out.println("[SERVER] Message sent [Type = SYN_ACK, SeqNum =  " + clientSeqBase + "]");
-                state = ServerState.SYN_RECEIVED;
+            } catch (IllegalArgumentException e) {
+
+                System.out.println(Colors.red("[SERVER] Received malformed message: " + e.getMessage()));
+                continue;
+
+            } catch (Exception e) {
+
+                System.out.println(Colors.red("[SERVER] Unexpected error reading packet: " + e.getMessage()));
+                e.printStackTrace();
+                continue;
+
             }
-            else if (state == ServerState.SYN_RECEIVED && msg.getMessageType() == Message.ACK)
-            {
-                System.out.println("Received ACK, SeqNum = " + msg.getSequenceNum());
-                state = ServerState.ESTABLISHED;
-                System.out.println(Colors.green("CONNECTION ESTABLISHED"));
+            try {
+                if (state == ServerState.LISTEN && msg.getMessageType() == Message.SYN) {
 
-                System.out.println("\n[SERVER] Session parameters:");
-                System.out.println("         Client ISN  : " + clientSeqBase);
-                System.out.println("         Max payload : " + MAX_PAYLOAD_SIZE + " bytes");
-                System.out.println("         Timeout     : " + TIMEOUT + " ms");
-                System.out.println("         Max retries : " + MAX_RETRIES);
-            }
-            else if (state == ServerState.ESTABLISHED && msg.getMessageType() == Message.DATA)
-            {
-                String payload = new String(msg.getPayload()).trim();
-                File f = new File(payload);
+                    clientSeqBase = msg.getSequenceNum();
 
-                // If the requested file exists on server → it's a download request
-                if (f.exists()) {
-                    handleDownloadRequest(msg);
-                } else {
-                    // Otherwise, it’s a new file coming from client → upload
-                    Message uploadStart = new Message(
-                        Message.DATA,
-                        msg.getSequenceNum(),
-                        ("UPLOAD:" + payload).getBytes()
-                    );
-                    handleUploadRequest(uploadStart);
+                    System.out.println("Received SYN, SeqNum = " + clientSeqBase);
+                    Message synAck = new Message(Message.SYN_ACK, clientSeqBase);
+
+                    sendMessage(synAck);
+
+                    System.out.println("[SERVER] Message sent [Type = SYN_ACK, SeqNum = " + clientSeqBase + "]");
+                    state = ServerState.SYN_RECEIVED;
+
+                } else if (state == ServerState.SYN_RECEIVED && msg.getMessageType() == Message.ACK) {
+
+                    System.out.println("Received ACK, SeqNum = " + msg.getSequenceNum());
+                    state = ServerState.ESTABLISHED;
+
+                    System.out.println(Colors.green("CONNECTION ESTABLISHED"));
+                    System.out.println("\n[SERVER] Session parameters:");
+                    System.out.println("         Client ISN  : " + clientSeqBase);
+                    System.out.println("         Max payload : " + MAX_PAYLOAD_SIZE + " bytes");
+                    System.out.println("         Timeout     : " + TIMEOUT + " ms");
+                    System.out.println("         Max retries : " + MAX_RETRIES);
+
+                } else if (state == ServerState.ESTABLISHED && msg.getMessageType() == Message.DATA) {
+
+                    String payload = new String(msg.getPayload()).trim();
+                    File f = new File(payload);
+
+                    if (f.exists()) {
+                        handleDownloadRequest(msg);
+
+                    } else {
+
+                        Message uploadStart = new Message(Message.DATA, msg.getSequenceNum(),
+                                ("UPLOAD:" + payload).getBytes());
+                        handleUploadRequest(uploadStart);
+
+                    }
+
+                } else if (state == ServerState.ESTABLISHED && msg.getMessageType() == Message.FIN) {
+
+                    System.out.println("Received FIN, SeqNum = " + msg.getSequenceNum());
+                    Message finAck = new Message(Message.FIN_ACK, msg.getSequenceNum());
+
+                    sendMessage(finAck);
+
+                    System.out.println("[SERVER] Message sent [Type = FIN_ACK, SeqNum = " + msg.getSequenceNum() + "]");
+                    System.out.println(Colors.green("CONNECTION CLOSED WITH CLIENT."));
+
+                    state = ServerState.LISTEN;
+
+                    clientAddress = null;
+                    clientPort = 0;
+                    clientSeqBase = 0;
+
+                    System.out.print(Colors.cyan("Do you want the server to keep listening for new connections? (Y/N): "));
+                    String input = prompt.nextLine().trim().toUpperCase();
+
+                    if (input.equals("N")) {
+
+                        System.out.println(Colors.red("Server shutting down..."));
+                        UDPsocket.close();
+                        break;
+
+                    } else {
+                        
+                        System.out.println(Colors.green("Server will continue listening on port."));
+                    }
                 }
-            }
+            } catch (Exception e) {
 
-            else if (state == ServerState.ESTABLISHED && msg.getMessageType() == Message.FIN)
-            {
-                System.out.println("Received FIN, SeqNum = " + msg.getSequenceNum());
+                System.out.println(Colors.red("[SERVER] Error handling message: " + e.getMessage()));
+                e.printStackTrace();
 
-                Message finAck = new Message(Message.FIN_ACK, msg.getSequenceNum());
-                sendMessage(finAck);
-                System.out.println("[SERVER] Message sent [Type = FIN_ACK, SeqNum =  " + msg.getSequenceNum() + "]");
-                
-                state = ServerState.LISTEN;
-                clientAddress = null;
-                clientPort = 0;
-                clientSeqBase = 0;
-
-                System.out.println(Colors.green("CONNECTION CLOSED  "));
             }
         }
     }

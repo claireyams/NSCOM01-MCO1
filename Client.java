@@ -480,7 +480,7 @@ public class Client
     }
 
     public static void main(String[] args) {
-        
+
         System.out.println(Colors.cyan("===== Starting CLIENT program ====="));
         Scanner scanner = new Scanner(System.in);
         Client client = null;
@@ -609,18 +609,22 @@ public class Client
 
             client.disconnect();
 
-        } catch (Exception e) {
+        } catch (UnknownHostException e) {
 
-            System.out.println(Colors.red("Error: " + e.getMessage()));
-            e.printStackTrace();
+        System.out.println(Colors.red("Invalid server hostname: " + e.getMessage()));
+        System.out.println(Colors.yellow("Please restart the client and enter a valid host (e.g., localhost or 127.0.0.1)."));
+    
+    } catch (Exception e) {
 
-        } finally {
+        System.out.println(Colors.red("Error: " + e.getMessage()));
+    
+    } finally {
 
-            if (client != null) client.close();
-            scanner.close();
+        if (client != null) client.close();
+        scanner.close();
 
         }
-    }
+}
 
 
     /** fields */

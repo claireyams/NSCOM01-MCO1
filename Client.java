@@ -161,8 +161,10 @@ public class Client
             }
 
             // sequence blocking
-            if(blockSequences && Math.random() < 0.1) {
-                System.out.println(Colors.yellow("[SABOTAGE] Blocked transmission of " + message.msgTypeString() + " SeqNum = " + message.getSequenceNum()));
+            if(blockSequences && blockedSeqNum != -1 && message.getSequenceNum() == blockedSeqNum)
+            {
+                System.out.println(Colors.yellow("[SABOTAGE] Blocked transmission of "
+                        + message.msgTypeString() + " SeqNum = " + message.getSequenceNum()));
                 return;
             }
         }
@@ -242,26 +244,6 @@ public class Client
         }
 
         return false;
-    }
-
-    /**
-     * Retransmits a message up to MAX_RETRIES times until the expected ACK is received.
-     *
-     * @param message     the Message to (re)send
-     * @param expectedAck the sequence number of the ACK to wait for
-     * @throws IOException if all retransmission attempts fail
-     */
-    private void retransmitMessage(Message message, int expectedAck) throws IOException
-    {
-        for(int i = 0; i < MAX_RETRIES; i++)
-        {
-            sendMessage(message);
-            if(waitAck(expectedAck)) 
-            {
-                return;
-            }
-        }
-        throw new IOException("Failed to send message after " + MAX_RETRIES + " retries");
     }
 
     /**
@@ -388,13 +370,15 @@ public class Client
      *
      * Protocol flow:
      *   1. Client sends DATA(sequenceNum, filename) as a download request.
-     *   2. Server responds with DATA packets (stop-and-wait).
-     *   3. Client ACKs each in-order packet; sends duplicate ACK for out-of-order.
-     *   4. Server sends FIN when all data is sent; client responds with FIN_ACK.
-     *   5. Client reassembles chunks and writes the file.
+     *   2. Server responds with ACK(sequenceNum) to acknowledge the request.
+     *   3. Client sends ACK(sequenceNum + 1) to confirm it is ready to receive.
+     *   4. Server sends DATA packets in stop-and-wait order.
+     *   5. Client ACKs each in-order packet; sends duplicate ACK for out-of-order.
+     *   6. Server sends FIN when all data is sent; client responds with FIN_ACK.
+     *   7. Client reassembles chunks and writes the file.
      *
      * @param remoteFilename  filename to request from the server
-     * @param localFilename   local path to save the downloaded file inside CLIENT_fOLDER
+     * @param localFilename   local path to save the downloaded file inside CLIENT_FOLDER
      * @return true if the file was downloaded successfully, false otherwise
      * @throws IOException if a network or file-system error occurs
      */
@@ -402,109 +386,159 @@ public class Client
     {
         if(state != ClientState.ESTABLISHED)
         {
-            System.out.println(Colors.red("Cannot start download. Connection is not established"));
+            System.out.println(Colors.red("Cannot start download. Connection is not established."));
             return false;
         }
 
         System.out.println(Colors.cyan("\n===== Starting File Download ====="));
         System.out.println("Remote: ServerFolder/" + remoteFilename + "  ->  Local: " + CLIENT_FOLDER + "/" + localFilename);
 
-        // send read request to server
         Message readRequest = new Message(Message.DATA, sequenceNum, remoteFilename.getBytes());
-        System.out.println("\nSending read request...");
-        sendMessage(readRequest);
-        System.out.println("[CLIENT] Sent download request. Expected SeqNum = " + sequenceNum + ", File = '" + remoteFilename + "'");
-        sequenceNum++;
+        boolean requestAcked = false;
 
+        for(int i = 0; i < MAX_RETRIES && !requestAcked; i++)
+        {
+            sendMessage(readRequest);
+            System.out.println("[CLIENT] Sent download request. SeqNum = " + sequenceNum
+                    + ", File = '" + remoteFilename + "'"
+                    + " (attempt " + (i + 1) + "/" + MAX_RETRIES + ")");
+
+            try
+            {
+                Message response = receiveMessage();
+
+                if(response.getMessageType() == Message.ERROR)
+                {
+                    String error = new String(response.getPayload());
+                    System.out.println(Colors.red("Server error: " + error));
+                    return false;
+                }
+                else if(response.getMessageType() == Message.ACK && response.getSequenceNum() == sequenceNum)
+                {
+                    System.out.println("Received ACK for download request. SeqNum = " + sequenceNum);
+                    requestAcked = true;
+                }
+                else
+                {
+                    System.out.println(Colors.yellow("[CLIENT] Unexpected response to download request: "
+                            + response.msgTypeString() + " SeqNum = " + response.getSequenceNum()));
+                }
+            }
+            catch(SocketTimeoutException e)
+            {
+                System.out.println(Colors.yellow("[CLIENT] Timeout waiting for download request ACK. (attempt "
+                        + (i + 1) + "/" + MAX_RETRIES + ")"));
+            }
+            catch(SecurityException | IllegalArgumentException e)
+            {
+                System.out.println(Colors.red("[CLIENT] Corrupted ACK during download request: " + e.getMessage()));
+            }
+        }
+
+        if(!requestAcked)
+        {
+            System.out.println(Colors.red("[CLIENT] Server did not acknowledge download request. Aborting."));
+            return false;
+        }
+
+        sequenceNum++;
         List<byte[]> receivedChunks = new ArrayList<>();
-        int expectedSeq = sequenceNum - 1;
+        int expectedSeq = sequenceNum;       // first data chunk arrives at current sequenceNum
+        int lastAckedSeq = sequenceNum - 1;  // nothing data-ACKed yet
         boolean complete = false;
         int timeoutAttempts = 0;
 
         while(!complete)
         {
-            try 
+            try
             {
                 Message response = receiveMessage();
-                timeoutAttempts = 0; // reset on any successful receive
 
                 if(response.getMessageType() == Message.ERROR)
                 {
                     String error = new String(response.getPayload());
-                    System.out.println("Received server error message: " + Colors.red(error));
+                    System.out.println(Colors.red("Received server error: " + error));
                     return false;
                 }
                 else if(response.getMessageType() == Message.DATA)
                 {
                     int recvSeqNum = response.getSequenceNum();
                     int recvPayloadLen = response.getPayloadLen();
-                    System.out.println("Received DATA packet. SeqNum = " + recvSeqNum + ", Payload Length = " + recvPayloadLen);
+                    System.out.println("Received DATA packet. SeqNum = " + recvSeqNum
+                            + ", Payload Length = " + recvPayloadLen);
 
                     if(recvSeqNum == expectedSeq)
                     {
+                        timeoutAttempts = 0; 
                         receivedChunks.add(response.getPayload());
+
                         Message ack = new Message(Message.ACK, recvSeqNum);
                         sendMessage(ack);
                         System.out.println("[CLIENT] Message sent [Type = ACK, SeqNum = " + recvSeqNum + "]");
+
+                        lastAckedSeq = recvSeqNum;
                         expectedSeq++;
                     }
-                    else 
+                    else
                     {
-                        System.out.println(Colors.yellow("Out of order packet. Expected SeqNum = " + expectedSeq + ", Received SeqNum = " + recvSeqNum));
-                            
-                        // if packet is duplicate
-                        if(expectedSeq > sequenceNum - 1)
-                        {
-                            Message dupeAck = new Message(Message.ACK, expectedSeq - 1);
-                            sendMessage(dupeAck);
-                            System.out.println("[CLIENT] Sent duplicate ACK for SeqNum = " + (expectedSeq - 1));
-                        }
+                        System.out.println(Colors.yellow("Out of order packet. Expected SeqNum = "
+                                + expectedSeq + ", Received SeqNum = " + recvSeqNum));
+
+                        Message dupeAck = new Message(Message.ACK, lastAckedSeq);
+                        sendMessage(dupeAck);
+                        System.out.println("[CLIENT] Sent duplicate ACK for SeqNum = " + lastAckedSeq);
                     }
                 }
                 else if(response.getMessageType() == Message.FIN)
                 {
-                    System.out.println("Received FIN for SeqNum = " + response.getSequenceNum());
+                    int finSeq = response.getSequenceNum();
+                    System.out.println("Received FIN for SeqNum = " + finSeq);
 
-                    Message fin_ack = new Message(Message.FIN_ACK, response.getSequenceNum());
-                    sendMessage(fin_ack);
-                    System.out.println("[CLIENT] Message sent [Type = FIN_ACK, SeqNum = "+ response.getSequenceNum() + "]");
+                    Message finAck = new Message(Message.FIN_ACK, finSeq);
+                    sendMessage(finAck);
+                    System.out.println("[CLIENT] Message sent [Type = FIN_ACK, SeqNum = " + finSeq + "]");
+
                     complete = true;
                 }
+                else
+                {
+                    System.out.println(Colors.yellow("[CLIENT] Unexpected message type during download: "
+                            + response.msgTypeString() + " SeqNum = " + response.getSequenceNum()));
+                }
             }
-            catch (SocketTimeoutException e)
+            catch(SocketTimeoutException e)
             {
                 timeoutAttempts++;
-                System.out.println(Colors.yellow("Timeout waiting for DATA. Attempt (" + timeoutAttempts + "/" + MAX_RETRIES + ")"));
-                
-                if (timeoutAttempts >= MAX_RETRIES) 
+                System.out.println(Colors.yellow("Timeout waiting for DATA. Attempt ("
+                        + timeoutAttempts + "/" + MAX_RETRIES + ")"));
+
+                if(timeoutAttempts >= MAX_RETRIES)
                 {
-                    System.out.println(Colors.red("[CLIENT] Download failed: no data received after " + MAX_RETRIES + " attempts."));
+                    System.out.println(Colors.red("[CLIENT] Download failed: no data received after "
+                            + MAX_RETRIES + " attempts."));
                     break;
                 }
-
-                // keep waiting for more data; server will retransmit on its own
-                continue;
             }
-            catch (SecurityException | IllegalArgumentException e)
+            catch(SecurityException | IllegalArgumentException e)
             {
-                System.out.println(Colors.red("[CLIENT] Dropped corrupted or malformed packet during download: " + e.getMessage()));
-                // treat as lost packet; keep waiting for retransmission
+                System.out.println(Colors.red("[CLIENT] Dropped corrupted or malformed packet during download: "
+                        + e.getMessage()));
+                // treat as lost packet; server will retransmit
             }
         }
 
         if(complete)
         {
             writeChunksToFile(receivedChunks, localFilename);
-            System.out.println("Total packet received: " + receivedChunks.size());
+            System.out.println("Total packets received: " + receivedChunks.size());
             System.out.println(Colors.green("FILE DOWNLOAD COMPLETE"));
-
             return true;
         }
 
         System.out.println(Colors.red("[CLIENT] FILE DOWNLOAD INCOMPLETE - transfer aborted before FIN."));
-        System.out.println(Colors.yellow("[CLIENT] Received " + receivedChunks.size() + " data packets before aborting."));
-
-        return false; 
+        System.out.println(Colors.yellow("[CLIENT] Received " + receivedChunks.size()
+                + " data packet(s) before aborting."));
+        return false;
     }
 
     /**
@@ -530,7 +564,7 @@ public class Client
         }
 
         System.out.println(Colors.cyan("\n===== Starting File Upload ====="));
-        System.out.println("Local: " + CLIENT_FOLDER + "/" + localFilename + "  ->   Remote: ServerFolder/" + remoteFilename);
+        System.out.println("Local: " + CLIENT_FOLDER + "/" + localFilename + "  ->   Remote: ServerFolder/" + remoteFilename + "\n");
 
         File file = new File(CLIENT_FOLDER, localFilename);
         if(!file.exists())
@@ -540,10 +574,24 @@ public class Client
         }
 
         Message filename = new Message(Message.DATA, sequenceNum, remoteFilename.getBytes());
-        sendMessage(filename);
-        System.out.println("[CLIENT] Sent filename: SeqNum = " + sequenceNum);
+        boolean filenameAcked = false;
 
-        if(!waitAck(sequenceNum))
+        for (int i = 0; i < MAX_RETRIES && !filenameAcked; i++) 
+        {
+            sendMessage(filename);
+            System.out.println("[CLIENT] Sent Upload Request [SeqNum = " + sequenceNum + "]");
+            
+            if (waitAck(sequenceNum)) 
+            {
+                filenameAcked = true;
+            } 
+            else 
+            {
+                System.out.println("[CLIENT] Retrying filename handshake (" + (i+2) + "/" + MAX_RETRIES + ")");
+            }
+        }
+
+        if (!filenameAcked) 
         {
             System.out.println(Colors.red("[CLIENT] No ACK received for filename. Upload aborted."));
             return false;
@@ -729,43 +777,32 @@ public class Client
         // sequence blocking
         System.out.print("Enable sequence blocking? (y/n): ");
         blockSequences = scanner.nextLine().trim().toLowerCase().startsWith("y");
+
+        if(blockSequences)
+        {
+            System.out.print("Enter SeqNum to block (-1 to disable): ");
+            try
+            {
+                blockedSeqNum = Integer.parseInt(scanner.nextLine().trim());
+
+                if(blockedSeqNum < -1)
+                    blockedSeqNum = -1;
+            }
+            catch(NumberFormatException e)
+            {
+                blockedSeqNum = -1; // default, no specific seq blocked
+            }
+        }
+        else
+        {
+            blockedSeqNum = -1;
+        }
+
         System.out.println(Colors.yellow("\n[SABOTAGE] Configuration:"));    
         System.out.println("Packet drop rate: " + (packetDropRate * 100) + "%");    
         System.out.println("Artificial delay: " + delayMs + "ms");
-        System.out.println("Sequence blocking: " + (blockSequences ? "enabled" : "disabled"));
+        System.out.println("Sequence blocking: " + (blockSequences ? "enabled (blocking SeqNum = " + blockedSeqNum + ")" : "disabled"));
         System.out.println(Colors.yellow("[SABOTAGE] These settings will test timeout, retransmission, and error recovery."));
-    }
-
-    private void applySabotage(Message message) throws IOException
-    {
-        // packet drop simulation
-        if(Math.random() < packetDropRate)
-        {
-            System.out.println(Colors.yellow("[SABOTAGE] Simulated packet drop: " + message.msgTypeString() + ", SeqNum = " + message.getSequenceNum()));        
-            return;
-        }
-
-        // artificial delay simulation
-        if(delayMs > 0)
-        {
-            try
-            {
-                int actualDelay = (int)(delayMs * (0.5 + Math.random()));
-                System.out.println(Colors.yellow("[SABOTAGE] Applying " + actualDelay + "ms delay to " + message.msgTypeString() + " SeqNum = " + message.getSequenceNum()));
-                Thread.sleep(actualDelay);
-            }
-            catch (InterruptedException e)
-            {
-                Thread.currentThread().interrupt();
-            }
-        }
-
-        // sequence blocking (occassionally block specific sequence numbers)
-        if(blockSequences && Math.random() < 0.1)
-        {
-            System.out.println(Colors.yellow("[SABOTAGE] Blocked transmission of " + message.msgTypeString() + " SeqNum = " + message.getSequenceNum()));
-            return;
-        }
     }
 
     private void selectTestMode(Scanner scanner)
@@ -965,7 +1002,6 @@ public class Client
         }
     }
 
-
     /** fields */
     private DatagramSocket UDPsocket;
     private InetAddress serverAddress;
@@ -987,4 +1023,5 @@ public class Client
     private double packetDropRate = 0.0;
     private int delayMs = 0;
     private boolean blockSequences = false;
+    private int blockedSeqNum = -1;
 }

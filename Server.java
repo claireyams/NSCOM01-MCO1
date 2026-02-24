@@ -200,8 +200,9 @@ public class Server
 
                     String payload = new String(msg.getPayload()).trim();
 
-                    if (payload.equals("LIST")) {
-
+                    if (payload.equals("LIST")) 
+                    {
+                        System.out.println(Colors.cyan("\n====== Sending ServerFolder File List====="));
                         String[] files = listServerFiles();
                         String fileList = String.join("\n", files);
                         Message response = new Message(Message.DATA, msg.getSequenceNum(), fileList.getBytes());
@@ -223,6 +224,7 @@ public class Server
 
                 } else if (state == ServerState.ESTABLISHED && msg.getMessageType() == Message.FIN) {
 
+                    System.out.println(Colors.cyan("\n====== Terminating Connection ====="));
                     System.out.println("Received FIN, SeqNum = " + msg.getSequenceNum());
                     Message finAck = new Message(Message.FIN_ACK, msg.getSequenceNum());
 
@@ -295,6 +297,10 @@ public class Server
         System.out.println(Colors.cyan("\n===== Handling Download Request ====="));
 
         String filename = new String(request.getPayload()).trim();
+        
+        int requestSeq = request.getSequenceNum();
+        System.out.println("[SERVER] Received download request for: '" + filename + "' SeqNum = " + requestSeq);
+
         File file = new File(SERVER_FOLDER, filename);
 
         if (!file.exists())
@@ -307,6 +313,11 @@ public class Server
             return;
         }
 
+        // ACK the download request before sending any data
+        Message requestAck = new Message(Message.ACK, requestSeq);
+        sendMessage(requestAck);
+        System.out.println("[SERVER] Message sent [Type = ACK, SeqNum = " + requestSeq + "]");
+
         long fileSize = file.length();
         System.out.println("[SERVER] Sending: '" + filename + "' (" + fileSize + " bytes)");
 
@@ -317,7 +328,7 @@ public class Server
             fis = new FileInputStream(file);
             byte[] buffer = new byte[MAX_PAYLOAD_SIZE];
             int bytesRead;
-            int seq = request.getSequenceNum();
+            int seq = requestSeq + 1;
 
             while ((bytesRead = fis.read(buffer)) != -1)
             {
@@ -356,7 +367,13 @@ public class Server
 
                 if (!acked)
                 {
-                    System.out.println(Colors.red("[SERVER] Transfer failed. No ACK for SeqNum = " + seq + " after " + MAX_RETRIES + " attempts."));
+                    System.out.println(Colors.red("[SERVER] Transfer failed. No ACK for SeqNum = "
+                            + seq + " after " + MAX_RETRIES + " attempts."));
+
+                    Message error = new Message(Message.ERROR, seq,
+                            ("Transfer aborted: no ACK for SeqNum = " + seq).getBytes());
+                    sendMessage(error);
+
                     fis.close();
                     return;
                 }
@@ -369,7 +386,7 @@ public class Server
 
             for (int i = 0; i < MAX_RETRIES && !finAcked; i++) {
                 sendMessage(fin);
-                System.out.println("[SERVER] Message sent [Type = FIN, SeqNum = "+ seq + "] (attempt " + (i + 1) + "/" + MAX_RETRIES + ")");
+                System.out.println("[SERVER] Message sent [Type = FIN, SeqNum = "+ seq + "]");
 
                 try {
                     Message response = receiveMessage();
@@ -425,20 +442,75 @@ public class Server
         }
 
         String filename = payload.substring(7);
-        File file = new File(SERVER_FOLDER, filename);
-        System.out.println("[SERVER] Preparing to receive file: " + filename);
-        System.out.println("[SERVER] Will save to: " + file.getPath());
+        
+        int requestSeq = request.getSequenceNum();
+        System.out.println("Received upload request for: '" + filename + "' SeqNum = " + requestSeq);
 
-        Message ack = new Message(Message.ACK, request.getSequenceNum());
-        sendMessage(ack);
-        System.out.println("[SERVER] Message sent [Type = ACK, SeqNum = "+ request.getSequenceNum() + "]");
+        File file = new File(SERVER_FOLDER, filename);
+        System.out.println("[SERVER] Will save to: " + file.getPath() + "\n");
+
+        // ACK the upload request and wait for the first DATA packet as confirmation
+        Message requestAck = new Message(Message.ACK, requestSeq);
+        Message firstData = null;
+
+        for(int i = 0; i < MAX_RETRIES && firstData == null; i++)
+        {
+            sendMessage(requestAck);
+            System.out.println("[SERVER] Message sent [Type = ACK, SeqNum = " + requestSeq + "]");
+
+            try
+            {
+                Message incoming = receiveMessage();
+
+                if(incoming.getMessageType() == Message.DATA && incoming.getSequenceNum() == requestSeq + 1)
+                {
+                    System.out.println("[SERVER] Client confirmed upload. First DATA SeqNum = " + incoming.getSequenceNum());
+                    firstData = incoming; // save it so we don't lose the first chunk
+                }
+                else if(incoming.getMessageType() == Message.DATA)
+                {
+                    System.out.println(Colors.yellow("[SERVER] Unexpected SeqNum on first DATA. Expected "
+                            + (requestSeq + 1) + ", got " + incoming.getSequenceNum()));
+                }
+                else
+                {
+                    System.out.println(Colors.yellow("[SERVER] Unexpected message during upload handshake: "
+                            + incoming.msgTypeString()));
+                }
+            }
+            catch(SocketTimeoutException e)
+            {
+                System.out.println(Colors.yellow("[SERVER] Timeout waiting for first DATA packet (attempt "
+                        + (i + 1) + "/" + MAX_RETRIES + ")"));
+            }
+            catch(SecurityException | IllegalArgumentException e)
+            {
+                System.out.println(Colors.red("Corrupted first DATA during upload handshake: " + e.getMessage()));
+            }
+        }
+
+        if(firstData == null)
+        {
+            System.out.println(Colors.red("Client did not begin upload. Aborting."));
+            return;
+        }
         
         FileOutputStream fos = null;
 
         try {
             fos = new FileOutputStream(file);
-            int expectedSeq = request.getSequenceNum() + 1;
+            int expectedSeq = requestSeq + 1;
             boolean receiving = true;
+
+            fos.write(firstData.getPayload());
+            fos.flush();
+            System.out.println("Received DATA SeqNum = " + firstData.getSequenceNum()
+                    + " (" + firstData.getPayload().length + " bytes)");
+            Message ackFirst = new Message(Message.ACK, firstData.getSequenceNum());
+            sendMessage(ackFirst);
+            System.out.println("[SERVER] Message sent [Type = ACK, SeqNum = " + firstData.getSequenceNum() + "]");
+            expectedSeq++;
+
             while (receiving) {
                 try {
                     Message msg = receiveMessage();
@@ -464,8 +536,6 @@ public class Server
                         Message finAck = new Message(Message.FIN_ACK, msg.getSequenceNum());
                         sendMessage(finAck);
                         System.out.println("[SERVER] Message sent [Type = FIN_ACK, SeqNum = "+ msg.getSequenceNum() + "]");
-                        
-                        expectedSeq++;
                         receiving = false;
                         System.out.println(Colors.green("[SERVER] Upload complete for '" + file.getPath() + "'"));
                     }

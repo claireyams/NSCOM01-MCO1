@@ -125,6 +125,10 @@ public class Client
                 System.out.println(Colors.yellow("Timeout waiting for SYN_ACK, retrying (" + (i + 1) + "/" + MAX_RETRIES + ")"));
                 sendMessage(syn); // retransmit SYN
             }
+            catch (SecurityException | IllegalArgumentException e)
+            {
+                System.out.println(Colors.red("[CLIENT] Corrupted or malformed handshake packet: " + e.getMessage()));
+            }
         }
 
         System.out.println(Colors.red("Failed to establish connection after " + MAX_RETRIES + "attempts"));
@@ -232,6 +236,10 @@ public class Client
         {
             System.out.println("[CLIENT] Timeout waiting for ACK SeqNum = " + expectedSeq);
         }
+        catch (SecurityException | IllegalArgumentException e)
+        {
+            System.out.println(Colors.red("[CLIENT] Dropped corrupted or malformed ACK for SeqNum = " + expectedSeq + ": " + e.getMessage()));
+        }
 
         return false;
     }
@@ -248,17 +256,9 @@ public class Client
         for(int i = 0; i < MAX_RETRIES; i++)
         {
             sendMessage(message);
-
-            try 
+            if(waitAck(expectedAck)) 
             {
-                if(waitAck(expectedAck)) 
-                {
-                    return;
-                }
-            }
-            catch(SocketTimeoutException e)
-            {
-                System.out.println("Timeout waiting for ACK, retrying (" + (i + 1) + "/" + MAX_RETRIES + ")");
+                return;
             }
         }
         throw new IOException("Failed to send message after " + MAX_RETRIES + " retries");
@@ -323,21 +323,45 @@ public class Client
     private List<String> getServerFileList() throws IOException
     {
         Message listRequest = new Message(Message.DATA, sequenceNum, "LIST".getBytes());
-        sendMessage(listRequest);
-
-        Message response = receiveMessage();
         List<String> files = new ArrayList<>();
 
-        if(response.getMessageType() == Message.DATA)
+        // Retransmit LIST request on timeout or corrupted responses so sabotage
+        // mode does not kill the whole client.
+        for (int attempt = 0; attempt < MAX_RETRIES; attempt++)
         {
-            String data = new String(response.getPayload());
-            String[] names = data.split("\n");
+            try
+            {
+                sendMessage(listRequest);
+                Message response = receiveMessage();
 
-            for(String name : names)
-                if(!name.trim().isEmpty())
-                    files.add(name.trim());
+                if(response.getMessageType() == Message.DATA)
+                {
+                    String data = new String(response.getPayload());
+                    String[] names = data.split("\n");
+
+                    for(String name : names)
+                        if(!name.trim().isEmpty())
+                            files.add(name.trim());
+
+                    return files;
+                }
+                else
+                {
+                    System.out.println(Colors.yellow("[CLIENT] Unexpected message type while listing server files: " + response.msgTypeString()));
+                }
+            }
+            catch (SocketTimeoutException e)
+            {
+                System.out.println(Colors.yellow("[CLIENT] Timeout waiting for server file list (attempt "
+                        + (attempt + 1) + "/" + MAX_RETRIES + ")"));
+            }
+            catch (SecurityException | IllegalArgumentException e)
+            {
+                System.out.println(Colors.red("[CLIENT] Dropped corrupted or malformed LIST response: " + e.getMessage()));
+            }
         }
 
+        System.out.println(Colors.red("[CLIENT] Unable to retrieve server file list after " + MAX_RETRIES + " attempts."));
         return files;
     }
 
@@ -461,6 +485,11 @@ public class Client
                 // keep waiting for more data; server will retransmit on its own
                 continue;
             }
+            catch (SecurityException | IllegalArgumentException e)
+            {
+                System.out.println(Colors.red("[CLIENT] Dropped corrupted or malformed packet during download: " + e.getMessage()));
+                // treat as lost packet; keep waiting for retransmission
+            }
         }
 
         if(complete)
@@ -573,6 +602,8 @@ public class Client
                     }
                 } catch (SocketTimeoutException e) {
                     System.out.println("Timeout waiting for FIN_ACK, retrying (" + (i + 1) + "/" + MAX_RETRIES + ")");
+                } catch (SecurityException | IllegalArgumentException e) {
+                    System.out.println(Colors.red("[CLIENT] Corrupted or malformed FIN_ACK during upload: " + e.getMessage()));
                 }
             }
 
@@ -635,6 +666,10 @@ public class Client
             {
                 System.out.println("Timeout waiting for ACK, retrying (" + (i + 1) + "/" + MAX_RETRIES + ")");
                 sendMessage(fin); // retransmit FIN message
+            }
+            catch (SecurityException | IllegalArgumentException e)
+            {
+                System.out.println(Colors.red("[CLIENT] Corrupted or malformed FIN_ACK during disconnect: " + e.getMessage()));
             }
         }
 
@@ -738,19 +773,29 @@ public class Client
         System.out.println(Colors.cyan("\n===== Test Mode Selection ====="));    
         System.out.println("[1] Normal Mode - Standard reliable transfer");    
         System.out.println("[2] Sabotage Mode - Test reliability and error handling");    
-        System.out.print("Select mode: ");        
-        String choice = scanner.nextLine().trim();
 
-        if(choice.equals("2"))
+        while (true)
         {
-            sabotageMode = true;
-            configureSabotageMode(scanner);
-            System.out.println(Colors.green("[MODE] Sabotage mode selected - reliability testing enabled"));
-        }
-        else 
-        {
-            sabotageMode = false;
-            System.out.println(Colors.green("[MODE] Normal mode selected - reliable transfer enabled"));
+            System.out.print("Select mode (1 or 2): ");
+            String choice = scanner.nextLine().trim();
+
+            if("1".equals(choice))
+            {
+                sabotageMode = false;
+                System.out.println(Colors.green("[MODE] Normal mode selected - reliable transfer enabled"));
+                break;
+            }
+            else if("2".equals(choice))
+            {
+                sabotageMode = true;
+                configureSabotageMode(scanner);
+                System.out.println(Colors.green("[MODE] Sabotage mode selected - reliability testing enabled"));
+                break;
+            }
+            else
+            {
+                System.out.println(Colors.yellow("Invalid choice. Please enter 1 for Normal or 2 for Sabotage."));
+            }
         }
     }
 

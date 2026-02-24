@@ -210,8 +210,6 @@ public class Server
 
                     } else {
 
-                        Server.configureSabotageMode(prompt);
-
                         File f = new File(SERVER_FOLDER, payload); // check inside ServerFolder
                         if (f.exists()) {
                             handleDownloadRequest(msg);
@@ -239,18 +237,23 @@ public class Server
                     clientPort = 0;
                     clientSeqBase = 0;
 
-                    System.out.print(Colors.cyan("Do you want the server to keep listening for new connections? (Y/N): "));
-                    String input = prompt.nextLine().trim().toUpperCase();
+                    // Ask the user explicitly whether to keep listening; only
+                    // accept Y or N so accidental keys do not keep the server
+                    // alive or shut it down unexpectedly.
+                    while (true) {
+                        System.out.print(Colors.cyan("Do you want the server to keep listening for new connections? (Y/N): "));
+                        String input = prompt.nextLine().trim().toUpperCase();
 
-                    if (input.equals("N")) {
-
-                        System.out.println(Colors.red("Server shutting down..."));
-                        UDPsocket.close();
-                        break;
-
-                    } else {
-
-                        System.out.println(Colors.green("Server will continue listening on port."));
+                        if ("Y".equals(input)) {
+                            System.out.println(Colors.green("Server will continue listening on port."));
+                            break;
+                        } else if ("N".equals(input)) {
+                            System.out.println(Colors.red("Server shutting down..."));
+                            UDPsocket.close();
+                            return;
+                        } else {
+                            System.out.println(Colors.yellow("Invalid choice. Please enter Y or N."));
+                        }
                     }
                 }
             } catch (Exception e) {
@@ -345,6 +348,10 @@ public class Server
                     {
                         System.out.println(Colors.yellow("[SERVER] Timeout waiting for ACK SeqNum = " + seq + " (attempt " + (i + 1) + "/" + MAX_RETRIES + ")"));
                     }
+                    catch (SecurityException | IllegalArgumentException e)
+                    {
+                        System.out.println(Colors.red("[SERVER] Dropped corrupted or malformed ACK for SeqNum = " + seq + ": " + e.getMessage()));
+                    }
                 }
 
                 if (!acked)
@@ -372,6 +379,8 @@ public class Server
                     }
                 } catch (SocketTimeoutException e) {
                     System.out.println(Colors.yellow("Timeout waiting for FIN_ACK (attempt " + (i + 1) + "/" + MAX_RETRIES + ")"));
+                } catch (SecurityException | IllegalArgumentException e) {
+                    System.out.println(Colors.red("[SERVER] Corrupted or malformed FIN_ACK during download FIN: " + e.getMessage()));
                 }
             }
 
@@ -463,6 +472,9 @@ public class Server
                 }
                 catch (SocketTimeoutException e) {
                     System.out.println(Colors.yellow("[SERVER] Waiting for more upload data..."));
+                }
+                catch (SecurityException | IllegalArgumentException e) {
+                    System.out.println(Colors.red("[SERVER] Dropped corrupted or malformed upload packet: " + e.getMessage()));
                 }
             }
         }

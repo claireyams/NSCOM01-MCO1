@@ -133,17 +133,43 @@ public class Client
         return false;
     }
 
-    /**
-     * WORKING: Serializes and sends a Message to the server.
     
+    // WORKING: Serializes and sends a Message to the server.
     private void sendMessage(Message message) throws IOException
     {
+        if(sabotageMode)
+        {
+            // packet drop
+            if(Math.random() < packetDropRate) {
+                System.out.println(Colors.yellow("[SABOTAGE] Simulated packet drop: " + message.msgTypeString() + ", SeqNum = " + message.getSequenceNum()));        
+                return; 
+            }
+
+            // artificial delay
+            if(delayMs > 0) {
+                try {
+                    int actualDelay = (int)(delayMs * (0.5 + Math.random()));
+                    System.out.println(Colors.yellow("[SABOTAGE] Applying " + actualDelay + "ms delay to " + message.msgTypeString() + " SeqNum = " + message.getSequenceNum()));
+                    Thread.sleep(actualDelay);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+
+            // sequence blocking
+            if(blockSequences && Math.random() < 0.1) {
+                System.out.println(Colors.yellow("[SABOTAGE] Blocked transmission of " + message.msgTypeString() + " SeqNum = " + message.getSequenceNum()));
+                return;
+            }
+        }
+
         byte[] data = message.convertToBytes();
         data = Cryptography.encrypt(data);
         DatagramPacket packet = new DatagramPacket(data, data.length, serverAddress, serverPort); 
         UDPsocket.send(packet);
     } 
-    **/
+    
+    /* 
     // DEBUG: simulate packet loss (30% drop)
     private static final double DROP_RATE = 0.3;
 
@@ -159,6 +185,7 @@ public class Client
         DatagramPacket packet = new DatagramPacket(data, data.length, serverAddress, serverPort);
         UDPsocket.send(packet);
     }
+    */
 
     /**
      * Blocks until a UDP datagram arrives from the server, then parses it.
@@ -356,7 +383,7 @@ public class Client
         }
 
         System.out.println(Colors.cyan("\n===== Starting File Download ====="));
-        System.out.println("Remote: " + remoteFilename + "  ->  Local: " + CLIENT_FOLDER + "/" + localFilename);
+        System.out.println("Remote: ServerFolder/" + remoteFilename + "  ->  Local: " + CLIENT_FOLDER + "/" + localFilename);
 
         // send read request to server
         Message readRequest = new Message(Message.DATA, sequenceNum, remoteFilename.getBytes());
@@ -368,12 +395,14 @@ public class Client
         List<byte[]> receivedChunks = new ArrayList<>();
         int expectedSeq = sequenceNum - 1;
         boolean complete = false;
+        int timeoutAttempts = 0;
 
         while(!complete)
         {
             try 
             {
                 Message response = receiveMessage();
+                timeoutAttempts = 0; // reset on any successful receive
 
                 if(response.getMessageType() == Message.ERROR)
                 {
@@ -420,11 +449,17 @@ public class Client
             }
             catch (SocketTimeoutException e)
             {
-                System.out.println(Colors.yellow("Timeout waiting for data."));
+                timeoutAttempts++;
+                System.out.println(Colors.yellow("Timeout waiting for DATA. Attempt (" + timeoutAttempts + "/" + MAX_RETRIES + ")"));
+                
+                if (timeoutAttempts >= MAX_RETRIES) 
+                {
+                    System.out.println(Colors.red("[CLIENT] Download failed: no data received after " + MAX_RETRIES + " attempts."));
+                    break;
+                }
 
-                // request retransmission
-                // System.out.println("Request Retransmission");
-                break;
+                // keep waiting for more data; server will retransmit on its own
+                continue;
             }
         }
 
@@ -436,6 +471,9 @@ public class Client
 
             return true;
         }
+
+        System.out.println(Colors.red("[CLIENT] FILE DOWNLOAD INCOMPLETE - transfer aborted before FIN."));
+        System.out.println(Colors.yellow("[CLIENT] Received " + receivedChunks.size() + " data packets before aborting."));
 
         return false; 
     }
@@ -463,7 +501,7 @@ public class Client
         }
 
         System.out.println(Colors.cyan("\n===== Starting File Upload ====="));
-        System.out.println("Local: " + CLIENT_FOLDER + "/" + localFilename + "  ->   Remote: " + remoteFilename);
+        System.out.println("Local: " + CLIENT_FOLDER + "/" + localFilename + "  ->   Remote: ServerFolder/" + remoteFilename);
 
         File file = new File(CLIENT_FOLDER, localFilename);
         if(!file.exists())
@@ -566,6 +604,14 @@ public class Client
 
         System.out.println(Colors.cyan("\n====== Terminating Connection ======"));
 
+        boolean wasSabotageMode = sabotageMode;
+    
+        // Temporarily disable sabotage for clean termination
+        if (sabotageMode) {
+            System.out.println(Colors.yellow("[CLIENT] Temporarily disabling sabotage for clean termination."));
+            sabotageMode = false;
+        }
+
         Message fin = new Message(Message.FIN, sequenceNum);
         sendMessage(fin);
         state = ClientState.FIN_WAIT;
@@ -594,6 +640,8 @@ public class Client
 
         state = ClientState.CLOSED;
         System.out.println(Colors.red("Forced disconnect after timeout."));
+
+        sabotageMode = wasSabotageMode;
     }
 
      /** Closes the UDP socket and releases system resources. */
@@ -602,6 +650,107 @@ public class Client
         if(UDPsocket != null && !UDPsocket.isClosed())
         {
             UDPsocket.close();
+        }
+    }
+
+    private void configureSabotageMode(Scanner scanner)
+    {
+        System.out.println("\nConfigure sabotage parameters:");
+        
+        // packet drop rate
+        System.out.print("Enter packet drop rate (0.0-1.0, recommended: 0.3): ");
+        try 
+        {
+            packetDropRate = Double.parseDouble(scanner.nextLine().trim());
+            
+            if(packetDropRate < 0.0)
+                packetDropRate = 0.0;
+
+            if(packetDropRate > 1.0)
+                packetDropRate = 1.0;
+        }
+        catch (NumberFormatException e)
+        {
+            packetDropRate = 0.3; // default
+        }
+
+        // delay simulation
+        System.out.print("Enter artificial delay in ms (0-5000, recommended: 1000): ");
+        try
+        {
+            delayMs = Integer.parseInt(scanner.nextLine().trim());
+            
+            if(delayMs < 0)
+                delayMs = 0;
+
+            if(delayMs > 5000)
+                delayMs = 5000;
+        }
+        catch (NumberFormatException e)
+        {
+            delayMs = 1000; // default
+        }
+
+        // sequence blocking
+        System.out.print("Enable sequence blocking? (y/n): ");
+        blockSequences = scanner.nextLine().trim().toLowerCase().startsWith("y");
+        System.out.println(Colors.yellow("\n[SABOTAGE] Configuration:"));    
+        System.out.println("Packet drop rate: " + (packetDropRate * 100) + "%");    
+        System.out.println("Artificial delay: " + delayMs + "ms");
+        System.out.println("Sequence blocking: " + (blockSequences ? "enabled" : "disabled"));
+        System.out.println(Colors.yellow("[SABOTAGE] These settings will test timeout, retransmission, and error recovery."));
+    }
+
+    private void applySabotage(Message message) throws IOException
+    {
+        // packet drop simulation
+        if(Math.random() < packetDropRate)
+        {
+            System.out.println(Colors.yellow("[SABOTAGE] Simulated packet drop: " + message.msgTypeString() + ", SeqNum = " + message.getSequenceNum()));        
+            return;
+        }
+
+        // artificial delay simulation
+        if(delayMs > 0)
+        {
+            try
+            {
+                int actualDelay = (int)(delayMs * (0.5 + Math.random()));
+                System.out.println(Colors.yellow("[SABOTAGE] Applying " + actualDelay + "ms delay to " + message.msgTypeString() + " SeqNum = " + message.getSequenceNum()));
+                Thread.sleep(actualDelay);
+            }
+            catch (InterruptedException e)
+            {
+                Thread.currentThread().interrupt();
+            }
+        }
+
+        // sequence blocking (occassionally block specific sequence numbers)
+        if(blockSequences && Math.random() < 0.1)
+        {
+            System.out.println(Colors.yellow("[SABOTAGE] Blocked transmission of " + message.msgTypeString() + " SeqNum = " + message.getSequenceNum()));
+            return;
+        }
+    }
+
+    private void selectTestMode(Scanner scanner)
+    {
+        System.out.println(Colors.cyan("\n===== Test Mode Selection ====="));    
+        System.out.println("[1] Normal Mode - Standard reliable transfer");    
+        System.out.println("[2] Sabotage Mode - Test reliability and error handling");    
+        System.out.print("Select mode: ");        
+        String choice = scanner.nextLine().trim();
+
+        if(choice.equals("2"))
+        {
+            sabotageMode = true;
+            configureSabotageMode(scanner);
+            System.out.println(Colors.green("[MODE] Sabotage mode selected - reliability testing enabled"));
+        }
+        else 
+        {
+            sabotageMode = false;
+            System.out.println(Colors.green("[MODE] Normal mode selected - reliable transfer enabled"));
         }
     }
 
@@ -620,77 +769,76 @@ public class Client
         System.out.println(Colors.cyan("===== Starting CLIENT program ====="));
         Scanner scanner = new Scanner(System.in);
         Client client = null;
+        int clientPort = 0; 
+        int serverPort = 0;
 
-        int clientPort = 0, serverPort = 0;
-
-        while (true) {
-
+        while (true) 
+        {
             System.out.print("Enter client port: ");
-
-            try {
-
+            try 
+            {
                 clientPort = Integer.parseInt(scanner.nextLine().trim());
-
-                if (clientPort <= 0 || clientPort > 65535) {
+                if (clientPort <= 0 || clientPort > 65535) 
+                {
                     System.out.println(Colors.red("Invalid port number. Please enter 1–65535."));
                     continue;
                 }
-
                 break;
-
-            } catch (NumberFormatException e) {
-
+            } 
+            catch (NumberFormatException e) 
+            {
                 System.out.println(Colors.red("Invalid input. Please enter a valid number for port."));
-
             }
         }
 
-        try {
-
+        try 
+        {
             client = new Client(clientPort);
-
-        } catch (Exception e) {
-
+        } 
+        catch (Exception e) 
+        {
             System.out.println(Colors.red("Failed to initialize client socket: " + e.getMessage()));
             return;
-
         }
 
         System.out.print("Enter server host (localhost): ");
         String serverHost = scanner.nextLine().trim();
 
-        if (serverHost.isEmpty()) serverHost = "localhost";
+        if (serverHost.isEmpty()) 
+        {
+            serverHost = "localhost";
+        }
 
-        while (true) {
-
+        while (true) 
+        {
             System.out.print("Enter server port: ");
-            try {
-
+            try 
+            {
                 serverPort = Integer.parseInt(scanner.nextLine().trim());
-                if (serverPort <= 0 || serverPort > 65535) {
-
+                if (serverPort <= 0 || serverPort > 65535) 
+                {
                     System.out.println(Colors.red("Invalid port number. Please enter 1–65535."));
                     continue;
                 }
                 break;
-
-            } catch (NumberFormatException e) {
-
+            } 
+            catch (NumberFormatException e) 
+            {
                 System.out.println(Colors.red("Invalid input. Please enter a valid number for port."));
             }
         }
-
-        try {
-            if (!client.connect(serverHost, serverPort)) {
-
+            
+        try 
+        {
+            if (!client.connect(serverHost, serverPort)) 
+            {
                 System.out.println(Colors.red("Failed to establish connection to server."));
                 return;
             }
 
             boolean flag = false;
-
-            while (!flag) {
-
+            while (!flag) 
+            {
                 System.out.println(Colors.cyan("\n===== File Transfer Functionality ====="));
                 System.out.println("[1] Download File");
                 System.out.println("[2] Upload File");
@@ -699,8 +847,10 @@ public class Client
 
                 String choice = scanner.nextLine().trim();
 
-                switch (choice) {
+                switch (choice) 
+                {
                     case "1":
+                        client.selectTestMode(scanner);
 
                         System.out.println(Colors.cyan("\n===== Download File ====="));
 
@@ -715,16 +865,16 @@ public class Client
 
                         if (!remoteFile.isEmpty() && !localFile.isEmpty())
                             client.downloadFile(remoteFile, localFile);
-
                         else
                             System.out.println(Colors.red("Filename cannot be empty."));
 
                         break;
 
                     case "2":
+                        client.selectTestMode(scanner);
 
                         System.out.println(Colors.cyan("\n===== Upload File ====="));
-                        
+                            
                         List<String> localFiles = client.showClientFiles();
                         if(localFiles.isEmpty())
                             break;
@@ -736,7 +886,6 @@ public class Client
 
                         if (!localUpload.isEmpty() && !remoteUpload.isEmpty())
                             client.uploadFile(localUpload, remoteUpload);
-
                         else
                             System.out.println(Colors.red("Filename cannot be empty."));
 
@@ -744,33 +893,32 @@ public class Client
 
                     case "X":
                     case "x":
-
                         flag = true;
                         break;
+                    
                     default:
-
                         System.out.println(Colors.yellow("Invalid option. Please choose 1, 2, or X."));
                 }
             }
-
             client.disconnect();
 
-        } catch (UnknownHostException e) {
-
-        System.out.println(Colors.red("Invalid server hostname: " + e.getMessage()));
-        System.out.println(Colors.yellow("Please restart the client and enter a valid host (e.g., localhost or 127.0.0.1)."));
+        } 
+        catch (UnknownHostException e)
+        {
+            System.out.println(Colors.red("Invalid server hostname: " + e.getMessage()));
+            System.out.println(Colors.yellow("Please restart the client and enter a valid host (e.g., localhost or 127.0.0.1)."));
     
-    } catch (Exception e) {
-
-        System.out.println(Colors.red("Error: " + e.getMessage()));
-    
-    } finally {
-
-        if (client != null) client.close();
-        scanner.close();
-
+        } 
+        catch (Exception e) 
+        {
+            System.out.println(Colors.red("Error: " + e.getMessage()));
+        } 
+        finally 
+        {
+            if (client != null) client.close();
+            scanner.close();
         }
-}
+    }
 
 
     /** fields */
@@ -789,4 +937,9 @@ public class Client
 
     /** dedicated directory where all client-side files are stored/saved */
     private static final String CLIENT_FOLDER = "ClientFolder";
+
+    private boolean sabotageMode = false;
+    private double packetDropRate = 0.0;
+    private int delayMs = 0;
+    private boolean blockSequences = false;
 }

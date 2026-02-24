@@ -44,6 +44,10 @@ public class Server
 
     private static final String SERVER_FOLDER = "ServerFolder";
 
+    private static boolean sabotageMode = false;
+    private static double serverDropRate = 0.2;
+    private static int serverDelayMs = 500;
+
     /**
      * Creates a Server bound to the given port.
      * @param serverPort  UDP port to listen on
@@ -73,6 +77,28 @@ public class Server
      */
     private void sendMessage(Message message) throws IOException
     {
+        if(sabotageMode)
+        {
+            if(Math.random() < serverDropRate)
+            {
+                System.out.println(Colors.yellow("[SERVER SABOTAGE] Dropped " + message.msgTypeString() + " SeqNum = " + message.getSequenceNum()));
+                return;
+            }
+
+            if(serverDelayMs > 0 && Math.random() < 0.3)
+            {
+                try
+                {
+                    Thread.sleep(serverDelayMs);
+                    System.out.println(Colors.yellow("[SERVER SABOTAGE] Delayed " + message.msgTypeString() + " SeqNum = " + message.getSequenceNum()));
+                }
+                catch (InterruptedException e)
+                {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        }
+
         byte[] data = message.convertToBytes();
         data = Cryptography.encrypt(data);
         DatagramPacket packet = new DatagramPacket(data, data.length, clientAddress, clientPort);
@@ -168,7 +194,7 @@ public class Server
                     System.out.println("         Client ISN  : " + clientSeqBase);
                     System.out.println("         Max payload : " + MAX_PAYLOAD_SIZE + " bytes");
                     System.out.println("         Timeout     : " + TIMEOUT + " ms");
-                    System.out.println("         Max retries : " + MAX_RETRIES);
+                    System.out.println("         Max retries : " + MAX_RETRIES + "\n");
 
                 } else if (state == ServerState.ESTABLISHED && msg.getMessageType() == Message.DATA) {
 
@@ -183,6 +209,8 @@ public class Server
                         System.out.println("[SERVER] Sent file list to client.");
 
                     } else {
+
+                        Server.configureSabotageMode(prompt);
 
                         File f = new File(SERVER_FOLDER, payload); // check inside ServerFolder
                         if (f.exists()) {
@@ -330,21 +358,28 @@ public class Server
             }
 
             Message fin = new Message(Message.FIN, seq);
-            sendMessage(fin);
-            System.out.println("[SERVER] Message sent [Type = FIN, SeqNum = "+ seq + "]");
+            boolean finAcked = false;
 
-            try
-            {
-                Message response = receiveMessage();
-                if (response.getMessageType() == Message.FIN_ACK)
-                    System.out.println("Received FIN_ACK for SeqNum = " + response.getSequenceNum());
-            }
-            catch (SocketTimeoutException e)
-            {
-                System.out.println(Colors.yellow("Timeout waiting for FIN_ACK."));
+            for (int i = 0; i < MAX_RETRIES && !finAcked; i++) {
+                sendMessage(fin);
+                System.out.println("[SERVER] Message sent [Type = FIN, SeqNum = "+ seq + "] (attempt " + (i + 1) + "/" + MAX_RETRIES + ")");
+
+                try {
+                    Message response = receiveMessage();
+                    if (response.getMessageType() == Message.FIN_ACK) {
+                        System.out.println("Received FIN_ACK for SeqNum = " + response.getSequenceNum());
+                        finAcked = true;
+                    }
+                } catch (SocketTimeoutException e) {
+                    System.out.println(Colors.yellow("Timeout waiting for FIN_ACK (attempt " + (i + 1) + "/" + MAX_RETRIES + ")"));
+                }
             }
 
-            System.out.println(Colors.green("[SERVER] Download complete for '" + filename + "'"));
+            if (finAcked) {
+                System.out.println(Colors.green("[SERVER] Download complete for '" + filename + "'"));
+            } else {
+                System.out.println(Colors.red("[SERVER] Download may be incomplete - FIN not acknowledged after " + MAX_RETRIES + " attempts"));
+            }
         }
         finally
         {
@@ -402,7 +437,7 @@ public class Server
                         if (msg.getSequenceNum() == expectedSeq) {
                             fos.write(msg.getPayload());
                             fos.flush();
-                            System.out.println("Received chunk SeqNum = " + msg.getSequenceNum()
+                            System.out.println("Received DATA SeqNum = " + msg.getSequenceNum()
                                     + " (" + msg.getPayload().length + " bytes)");
                             Message ackData = new Message(Message.ACK, msg.getSequenceNum());
                             sendMessage(ackData);
@@ -416,7 +451,7 @@ public class Server
                         }
                     }
                     else if (msg.getMessageType() == Message.FIN) {
-                        System.out.println("Received FIN_ACK for SeqNum = " + msg.getSequenceNum());
+                        System.out.println("Received FIN for SeqNum = " + msg.getSequenceNum());
                         Message finAck = new Message(Message.FIN_ACK, msg.getSequenceNum());
                         sendMessage(finAck);
                         System.out.println("[SERVER] Message sent [Type = FIN_ACK, SeqNum = "+ msg.getSequenceNum() + "]");
@@ -446,6 +481,18 @@ public class Server
             UDPsocket.close();
     }
 
+    public static void configureSabotageMode(Scanner scanner)
+    {
+        System.out.print("Enable server sabotage mode for testing? (y/n): ");    
+        String choice = scanner.nextLine().trim().toLowerCase();    
+
+        if(choice.startsWith("y"))
+        {
+            sabotageMode = true;
+            System.out.println(Colors.yellow("[SERVER SABOTAGE] Enabled with 20% drop rate and 500ms delay"));
+        }
+    }
+
     /**
      * Application entry point. Prompts for a port number, then starts the
      * server loop.  Cleans up the socket in a finally block.
@@ -462,41 +509,37 @@ public class Server
 
             System.out.print("Enter server port: ");
 
-            try {
-
+            try 
+            {
                 port = Integer.parseInt(scanner.nextLine().trim());
-
-                if (port <= 0 || port > 65535) {
+                if (port <= 0 || port > 65535) 
+                {
                     System.out.println(Colors.red("Invalid port number. Please enter a value between 1-65535."));
                     continue;
                 }
-
                 break;
-
-            } catch (NumberFormatException e) {
-
+            } 
+            catch (NumberFormatException e) 
+            {
                 System.out.println(Colors.red("Invalid input. Please enter a valid number for port."));
-
             }
         }
 
         Server server = null;
-
-        try {
-
+        try 
+        {
             server = new Server(port);
             server.start();
-
-        } catch (Exception e) {
-
+        } 
+        catch (Exception e) 
+        {
             System.out.println(Colors.red("Error: " + e.getMessage()));
             e.printStackTrace();
-
-        } finally {
-
+        } 
+        finally 
+        {
             if (server != null) server.close();
             scanner.close();
-
         }
     }
 }

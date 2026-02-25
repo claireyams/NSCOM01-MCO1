@@ -2,8 +2,6 @@ import java.io.*;
 import java.net.*;
 import java.util.*;
 
-//last update: Feb 21, 2026 10:05am
-
 /**
  *  The class Server represents the server in the reliable data transfer protocol over UDP.
  * 
@@ -31,19 +29,23 @@ public class Server
         LISTEN, SYN_RECEIVED, ESTABLISHED, CLOSE_WAIT
     }
 
+    // Server instance variables
     private DatagramSocket UDPsocket;
     private InetAddress clientAddress;
     private int clientPort;
     private ServerState state;
     private int clientSeqBase;
 
+    // Protocol parameters
     private static final int TIMEOUT = 5000; // 5 seconds
     private static final int MAX_RETRIES = 3;
     private static final int BUFFER_SIZE = 4096;
     private static final int MAX_PAYLOAD_SIZE = 1000;
 
+    // Directory where the server stores files for upload/download operations
     private static final String SERVER_FOLDER = "ServerFolder";
 
+    // Sabotage mode parameters for testing robustness under lossy conditions
     private static boolean sabotageMode = false;
     private static double serverDropRate = 0.2;
     private static int serverDelayMs = 500;
@@ -208,19 +210,15 @@ public class Server
                         Message response = new Message(Message.DATA, msg.getSequenceNum(), fileList.getBytes());
                         sendMessage(response);
                         System.out.println("[SERVER] Sent file list to client.");
-
-                    } else {
-
-                        File f = new File(SERVER_FOLDER, payload); // check inside ServerFolder
-                        if (f.exists()) {
-                            handleDownloadRequest(msg);
-                        } else {
-                            Message uploadStart = new Message(Message.DATA, msg.getSequenceNum(),
-                                    ("UPLOAD:" + payload).getBytes());
-                            handleUploadRequest(uploadStart);
-                        }
-
                     }
+
+                } else if (state == ServerState.ESTABLISHED && msg.getMessageType() == Message.READ) {
+
+                    handleDownloadRequest(msg);
+
+                } else if (state == ServerState.ESTABLISHED && msg.getMessageType() == Message.WRITE) {
+
+                    handleUploadRequest(msg);
 
                 } else if (state == ServerState.ESTABLISHED && msg.getMessageType() == Message.FIN) {
 
@@ -239,9 +237,6 @@ public class Server
                     clientPort = 0;
                     clientSeqBase = 0;
 
-                    // Ask the user explicitly whether to keep listening; only
-                    // accept Y or N so accidental keys do not keep the server
-                    // alive or shut it down unexpectedly.
                     while (true) {
                         System.out.print(Colors.cyan("Do you want the server to keep listening for new connections? (Y/N): "));
                         String input = prompt.nextLine().trim().toUpperCase();
@@ -267,6 +262,15 @@ public class Server
         }
     }
 
+    /**
+     * Returns the list of filenames currently stored in the server's folder.
+     *
+     * The result is used to answer client LIST requests and to drive server-
+     * side debugging or manual inspection of available files.
+     *
+     * @return array of simple filenames under {@value #SERVER_FOLDER}, or an
+     *         empty array if the directory is empty or cannot be listed
+     */
     private String[] listServerFiles()
     {
         File folder = new File(SERVER_FOLDER);
@@ -299,7 +303,7 @@ public class Server
         String filename = new String(request.getPayload()).trim();
         
         int requestSeq = request.getSequenceNum();
-        System.out.println("[SERVER] Received download request for: '" + filename + "' SeqNum = " + requestSeq);
+        System.out.println("[SERVER] Received READ request for: '" + filename + "' SeqNum = " + requestSeq);
 
         File file = new File(SERVER_FOLDER, filename);
 
@@ -352,7 +356,7 @@ public class Server
                         }
                         else
                         {
-                            System.out.println(Colors.yellow("Wrong ACK received. Expected SeqNum = " + seq + "Received SeqNum = " + ack.getSequenceNum()));
+                            System.out.println(Colors.yellow("Wrong ACK received. Expected SeqNum = " + seq + ", Received SeqNum = " + ack.getSequenceNum()));
                         }
                     }
                     catch (SocketTimeoutException e)
@@ -374,7 +378,6 @@ public class Server
                             ("Transfer aborted: no ACK for SeqNum = " + seq).getBytes());
                     sendMessage(error);
 
-                    fis.close();
                     return;
                 }
 
@@ -432,19 +435,10 @@ public class Server
     private void handleUploadRequest(Message request) throws IOException
     {
         System.out.println(Colors.cyan("\n===== Handling Upload Request ====="));
-        
-        String payload = new String(request.getPayload()).trim();
-        if (!payload.startsWith("UPLOAD:")) {
-            Message error = new Message(Message.ERROR, request.getSequenceNum(),
-                    "Invalid upload request format".getBytes());
-            sendMessage(error);
-            return;
-        }
 
-        String filename = payload.substring(7);
-        
+        String filename = new String(request.getPayload()).trim();
         int requestSeq = request.getSequenceNum();
-        System.out.println("Received upload request for: '" + filename + "' SeqNum = " + requestSeq);
+        System.out.println("Received WRITE request for: '" + filename + "' SeqNum = " + requestSeq);
 
         File file = new File(SERVER_FOLDER, filename);
         System.out.println("[SERVER] Will save to: " + file.getPath() + "\n");
@@ -511,9 +505,11 @@ public class Server
             System.out.println("[SERVER] Message sent [Type = ACK, SeqNum = " + firstData.getSequenceNum() + "]");
             expectedSeq++;
 
+            int uploadTimeouts = 0;
             while (receiving) {
                 try {
                     Message msg = receiveMessage();
+                    uploadTimeouts = 0; // reset on any successful receive
                     if (msg.getMessageType() == Message.DATA) {
                         if (msg.getSequenceNum() == expectedSeq) {
                             fos.write(msg.getPayload());
@@ -541,7 +537,15 @@ public class Server
                     }
                 }
                 catch (SocketTimeoutException e) {
-                    System.out.println(Colors.yellow("[SERVER] Waiting for more upload data..."));
+                    uploadTimeouts++;
+                    System.out.println(Colors.yellow("[SERVER] Timeout waiting for upload data (attempt "
+                            + uploadTimeouts + "/" + MAX_RETRIES + ")"));
+                    if (uploadTimeouts >= MAX_RETRIES)
+                    {
+                        System.out.println(Colors.red("[SERVER] Upload aborted: client unresponsive after "
+                                + MAX_RETRIES + " timeouts."));
+                        receiving = false;
+                    }
                 }
                 catch (SecurityException | IllegalArgumentException e) {
                     System.out.println(Colors.red("[SERVER] Dropped corrupted or malformed upload packet: " + e.getMessage()));
@@ -553,6 +557,7 @@ public class Server
         }
     }
 
+
     /**
      * Closes the underlying UDP socket and releases all system resources.
      * Safe to call even if the socket is already closed or was never opened.
@@ -563,6 +568,16 @@ public class Server
             UDPsocket.close();
     }
 
+    /**
+     * Optionally enables server-side sabotage mode for testing.
+     *
+     * When the user answers 'y', outgoing packets from the server are randomly
+     * dropped or delayed according to {@code serverDropRate} and
+     * {@code serverDelayMs}. This is used to demonstrate the robustness of the
+     * stop-and-wait protocol under lossy conditions.
+     *
+     * @param scanner interactive console scanner used to read the user's choice
+     */
     public static void configureSabotageMode(Scanner scanner)
     {
         System.out.print("Enable server sabotage mode for testing? (y/n): ");    

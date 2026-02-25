@@ -2,8 +2,6 @@ import java.util.*;
 import java.net.*;
 import java.io.*;
 
-//last update: Feb 21, 2026 10:05am
-
 /**
  *  The class Client represents a client in the reliable data transfer protocol over UDP.
  *  It supports session establishment (three-way handshake), file download, file upload, and clean session termination.
@@ -32,7 +30,7 @@ public class Client
 
     /**
      * Creates a Client bound to the given local port and ensures that
-     * {@value #CLIENT_FOLDER} exists on the local file system.
+     * CLIENT_FOLDER exists on the local file system.
      *
      * The initial Sequence Number (ISN) starts at 0.
      *
@@ -131,22 +129,23 @@ public class Client
             }
         }
 
-        System.out.println(Colors.red("Failed to establish connection after " + MAX_RETRIES + "attempts"));
+        System.out.println(Colors.red("Failed to establish connection after " + MAX_RETRIES + " attempts"));
         state = ClientState.CLOSED;
 
         return false;
     }
 
     
-    // WORKING: Serializes and sends a Message to the server.
     private void sendMessage(Message message) throws IOException
     {
         if(sabotageMode)
         {
-            // packet drop
-            if(Math.random() < packetDropRate) {
-                System.out.println(Colors.yellow("[SABOTAGE] Simulated packet drop: " + message.msgTypeString() + ", SeqNum = " + message.getSequenceNum()));        
-                return; 
+            // sequence blocking
+            if(blockSequences && blockedSeqNum != -1 && message.getSequenceNum() == blockedSeqNum)
+            {
+                System.out.println(Colors.yellow("[SABOTAGE] Blocked transmission of " + message.msgTypeString() + " SeqNum = " + message.getSequenceNum() + " — retransmissions will be allowed (single packet loss simulation)"));
+                blockedSeqNum = -1;
+                return;
             }
 
             // artificial delay
@@ -159,14 +158,6 @@ public class Client
                     Thread.currentThread().interrupt();
                 }
             }
-
-            // sequence blocking
-            if(blockSequences && blockedSeqNum != -1 && message.getSequenceNum() == blockedSeqNum)
-            {
-                System.out.println(Colors.yellow("[SABOTAGE] Blocked transmission of "
-                        + message.msgTypeString() + " SeqNum = " + message.getSequenceNum()));
-                return;
-            }
         }
 
         byte[] data = message.convertToBytes();
@@ -174,24 +165,6 @@ public class Client
         DatagramPacket packet = new DatagramPacket(data, data.length, serverAddress, serverPort); 
         UDPsocket.send(packet);
     } 
-    
-    /* 
-    // DEBUG: simulate packet loss (30% drop)
-    private static final double DROP_RATE = 0.3;
-
-    private void sendMessage(Message message) throws IOException {
-        if (Math.random() < DROP_RATE) {
-            System.out.println("[DEBUG] Simulated packet drop: " + message.msgTypeString() +
-                            " Seq=" + message.getSequenceNum());
-            return; // pretend packet was sent
-        }
-
-        byte[] data = message.convertToBytes();
-        data = Cryptography.encrypt(data);
-        DatagramPacket packet = new DatagramPacket(data, data.length, serverAddress, serverPort);
-        UDPsocket.send(packet);
-    }
-    */
 
     /**
      * Blocks until a UDP datagram arrives from the server, then parses it.
@@ -218,7 +191,7 @@ public class Client
      * @return true if the correct ACK arrived; false otherwise
      * @throws IOException if a network error occurs (SocketTimeoutException is caught internally)
      */
-    private boolean waitAck(int expectedSeq) throws IOException
+    private boolean waitAck(int expectedSeq, int attempt, int maxRetries) throws IOException
     {
         try 
         {
@@ -231,12 +204,13 @@ public class Client
             }
             else
             {
-                System.out.println(Colors.yellow("[CLIENT] Wrong ACK: Expected SeqNum=" + expectedSeq + ", Received SeqNum =" + response.getSequenceNum()));
+                System.out.println(Colors.yellow("[CLIENT] Wrong ACK: Expected SeqNum = " + expectedSeq + ", Received SeqNum = " + response.getSequenceNum()));
             }
         }
         catch (SocketTimeoutException e)
         {
-            System.out.println("[CLIENT] Timeout waiting for ACK SeqNum = " + expectedSeq);
+            System.out.println(Colors.yellow("[CLIENT] Timeout waiting for ACK SeqNum = " + expectedSeq
+                    + " (" + attempt + "/" + maxRetries + ")"));
         }
         catch (SecurityException | IllegalArgumentException e)
         {
@@ -279,6 +253,14 @@ public class Client
         System.out.println("[CLIENT] File saved to: " + dest.getPath());
     }
 
+    /**
+     * Lists all regular files currently present in the client folder.
+     *
+     * The filenames are printed to the console and also returned in a list so
+     * that menu logic can validate user choices.
+     *
+     * @return list of simple filenames located under {@value #CLIENT_FOLDER}
+     */
     public List<String> showClientFiles()
     {
         System.out.println("Files on Client");
@@ -302,6 +284,17 @@ public class Client
         return files;
     }
 
+    /**
+     * Requests and returns the list of files currently available on the server.
+     *
+     * Sends a special "LIST" DATA message, then waits for a DATA response whose
+     * payload is a newline-separated list of filenames. On timeout or corrupted
+     * responses, the request is retried up to {@value #MAX_RETRIES} times.
+     *
+     * @return list of filenames advertised by the server (possibly empty)
+     * @throws IOException if a non-timeout I/O error occurs while sending or
+     *                     receiving the LIST exchange
+     */
     private List<String> getServerFileList() throws IOException
     {
         Message listRequest = new Message(Message.DATA, sequenceNum, "LIST".getBytes());
@@ -347,6 +340,16 @@ public class Client
         return files;
     }
 
+    /**
+     * Prints and returns the list of files available on the server.
+     *
+     * Internally calls {@link #getServerFileList()} to perform the LIST request
+     * with retry logic, then renders the result in a user-friendly format for
+     * the interactive menu.
+     *
+     * @return list of filenames advertised by the server (possibly empty)
+     * @throws IOException if the underlying LIST request fails with an I/O error
+     */
     public List<String> showServerFiles() throws IOException
     {
         System.out.println("Files on Server:");
@@ -393,15 +396,13 @@ public class Client
         System.out.println(Colors.cyan("\n===== Starting File Download ====="));
         System.out.println("Remote: ServerFolder/" + remoteFilename + "  ->  Local: " + CLIENT_FOLDER + "/" + localFilename);
 
-        Message readRequest = new Message(Message.DATA, sequenceNum, remoteFilename.getBytes());
+        Message readRequest = new Message(Message.READ, sequenceNum, remoteFilename.getBytes());
         boolean requestAcked = false;
 
         for(int i = 0; i < MAX_RETRIES && !requestAcked; i++)
         {
             sendMessage(readRequest);
-            System.out.println("[CLIENT] Sent download request. SeqNum = " + sequenceNum
-                    + ", File = '" + remoteFilename + "'"
-                    + " (attempt " + (i + 1) + "/" + MAX_RETRIES + ")");
+            System.out.println("[CLIENT] Message sent [Type = READ, SeqNum = " + sequenceNum + ", File = '" + remoteFilename + "'" + " (attempt " + (i + 1) + "/" + MAX_RETRIES + ")]");
 
             try
             {
@@ -521,9 +522,7 @@ public class Client
             }
             catch(SecurityException | IllegalArgumentException e)
             {
-                System.out.println(Colors.red("[CLIENT] Dropped corrupted or malformed packet during download: "
-                        + e.getMessage()));
-                // treat as lost packet; server will retransmit
+                System.out.println(Colors.red("[CLIENT] Dropped corrupted or malformed packet during download: " + e.getMessage()));
             }
         }
 
@@ -573,21 +572,17 @@ public class Client
             return false;
         }
 
-        Message filename = new Message(Message.DATA, sequenceNum, remoteFilename.getBytes());
+        Message filename = new Message(Message.WRITE, sequenceNum, remoteFilename.getBytes());
         boolean filenameAcked = false;
 
         for (int i = 0; i < MAX_RETRIES && !filenameAcked; i++) 
         {
             sendMessage(filename);
-            System.out.println("[CLIENT] Sent Upload Request [SeqNum = " + sequenceNum + "]");
+            System.out.println("[CLIENT] Message sent [Type = WRITE, SeqNum = " + sequenceNum + ", File = '" + remoteFilename + "']");
             
-            if (waitAck(sequenceNum)) 
+            if (waitAck(sequenceNum, i + 1, MAX_RETRIES))
             {
                 filenameAcked = true;
-            } 
-            else 
-            {
-                System.out.println("[CLIENT] Retrying filename handshake (" + (i+2) + "/" + MAX_RETRIES + ")");
             }
         }
 
@@ -616,13 +611,9 @@ public class Client
                     System.out.println("[CLIENT] Message sent [Type = DATA, SeqNum = " + sequenceNum +
                                     ", Payload = " + bytesRead + " bytes]");
 
-                    if (waitAck(sequenceNum)) 
+                    if (waitAck(sequenceNum, i + 1, MAX_RETRIES))
                     {
                         acked = true;
-                    } 
-                    else 
-                    {
-                        System.out.println("[CLIENT] Retrying SeqNum = " + sequenceNum + " (attempt " + (i + 1) + "/" + MAX_RETRIES + ")");
                     }
                 }
 
@@ -649,7 +640,7 @@ public class Client
                         complete = true;
                     }
                 } catch (SocketTimeoutException e) {
-                    System.out.println("Timeout waiting for FIN_ACK, retrying (" + (i + 1) + "/" + MAX_RETRIES + ")");
+                    System.out.println(Colors.yellow("Timeout waiting for FIN_ACK, retrying (" + (i + 1) + "/" + MAX_RETRIES + ")"));
                 } catch (SecurityException | IllegalArgumentException e) {
                     System.out.println(Colors.red("[CLIENT] Corrupted or malformed FIN_ACK during upload: " + e.getMessage()));
                 }
@@ -685,15 +676,17 @@ public class Client
 
         boolean wasSabotageMode = sabotageMode;
     
-        // Temporarily disable sabotage for clean termination
+        // temporarily disable sabotage for clean termination
         if (sabotageMode) {
             System.out.println(Colors.yellow("[CLIENT] Temporarily disabling sabotage for clean termination."));
             sabotageMode = false;
         }
 
         Message fin = new Message(Message.FIN, sequenceNum);
-        sendMessage(fin);
         state = ClientState.FIN_WAIT;
+
+        // initial send
+        sendMessage(fin);
         System.out.println("[CLIENT] Message sent [Type = FIN, SeqNum = " + sequenceNum + "]");
 
         for(int i = 0; i < MAX_RETRIES; i++)
@@ -712,8 +705,10 @@ public class Client
             }
             catch (SocketTimeoutException e)
             {
-                System.out.println("Timeout waiting for ACK, retrying (" + (i + 1) + "/" + MAX_RETRIES + ")");
-                sendMessage(fin); // retransmit FIN message
+                System.out.println(Colors.yellow("[CLIENT] Timeout waiting for FIN_ACK."
+                        + (i < MAX_RETRIES ? " retransmitting FIN..." : "")));
+                sendMessage(fin);
+                System.out.println("[CLIENT] Message sent [Type = FIN, SeqNum = " + sequenceNum + " (retransmission " + (i + 1) + "/" + MAX_RETRIES + ")]");
             }
             catch (SecurityException | IllegalArgumentException e)
             {
@@ -736,27 +731,14 @@ public class Client
         }
     }
 
+    /**
+     * Interactive configuration of sabotage mode parameters.
+     * @param scanner Scanner for user input
+     */
     private void configureSabotageMode(Scanner scanner)
     {
         System.out.println("\nConfigure sabotage parameters:");
         
-        // packet drop rate
-        System.out.print("Enter packet drop rate (0.0-1.0, recommended: 0.3): ");
-        try 
-        {
-            packetDropRate = Double.parseDouble(scanner.nextLine().trim());
-            
-            if(packetDropRate < 0.0)
-                packetDropRate = 0.0;
-
-            if(packetDropRate > 1.0)
-                packetDropRate = 1.0;
-        }
-        catch (NumberFormatException e)
-        {
-            packetDropRate = 0.3; // default
-        }
-
         // delay simulation
         System.out.print("Enter artificial delay in ms (0-5000, recommended: 1000): ");
         try
@@ -798,13 +780,16 @@ public class Client
             blockedSeqNum = -1;
         }
 
-        System.out.println(Colors.yellow("\n[SABOTAGE] Configuration:"));    
-        System.out.println("Packet drop rate: " + (packetDropRate * 100) + "%");    
+        System.out.println(Colors.yellow("\n[SABOTAGE] Configuration:")); 
         System.out.println("Artificial delay: " + delayMs + "ms");
         System.out.println("Sequence blocking: " + (blockSequences ? "enabled (blocking SeqNum = " + blockedSeqNum + ")" : "disabled"));
         System.out.println(Colors.yellow("[SABOTAGE] These settings will test timeout, retransmission, and error recovery."));
     }
 
+    /**
+     * Presents the user with a choice between Normal Mode (reliable transfer) and Sabotage Mode (introduces delays and packet loss).
+     * @param scanner Scanner for user input
+     */
     private void selectTestMode(Scanner scanner)
     {
         System.out.println(Colors.cyan("\n===== Test Mode Selection ====="));    
@@ -1020,7 +1005,6 @@ public class Client
     private static final String CLIENT_FOLDER = "ClientFolder";
 
     private boolean sabotageMode = false;
-    private double packetDropRate = 0.0;
     private int delayMs = 0;
     private boolean blockSequences = false;
     private int blockedSeqNum = -1;

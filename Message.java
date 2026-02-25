@@ -3,8 +3,6 @@ import java.nio.ByteBuffer;
 import java.security.*;
 import java.util.Arrays;
 
-//last update: Feb 21, 2026 10:05am
-
 /**
  *  The class Message represents a message in the reliable data transfer protocol over UDP.
  * 
@@ -178,14 +176,16 @@ public class Message implements Serializable
     {
         switch(messageType)
         {
-            case SYN: return "SYN";
+            case SYN:     return "SYN";
             case SYN_ACK: return "SYN_ACK";
-            case DATA: return "DATA";
-            case ACK: return "ACK";
-            case FIN: return "FIN";
+            case DATA:    return "DATA";
+            case ACK:     return "ACK";
+            case FIN:     return "FIN";
             case FIN_ACK: return "FIN_ACK";
-            case ERROR: return "ERROR";
-            default: return "UNKNOWN";
+            case ERROR:   return "ERROR";
+            case READ:    return "READ";
+            case WRITE:   return "WRITE";
+            default:      return "UNKNOWN";
         }
     }
 
@@ -217,13 +217,15 @@ public class Message implements Serializable
     }
 
     // message types
-    public static final byte SYN = 0x01;
+    public static final byte SYN     = 0x01;
     public static final byte SYN_ACK = 0x02;
-    public static final byte DATA = 0x03;
-    public static final byte ACK = 0x04;
-    public static final byte FIN = 0x05;
+    public static final byte DATA    = 0x03;
+    public static final byte ACK     = 0x04;
+    public static final byte FIN     = 0x05;
     public static final byte FIN_ACK = 0x06;
-    public static final byte ERROR = 0x07;
+    public static final byte ERROR   = 0x07;
+    public static final byte READ    = 0x08;
+    public static final byte WRITE   = 0x09;
 
     // datagram header fields
     private byte messageType;

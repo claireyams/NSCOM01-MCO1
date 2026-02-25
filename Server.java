@@ -45,10 +45,63 @@ public class Server
     // Directory where the server stores files for upload/download operations
     private static final String SERVER_FOLDER = "ServerFolder";
 
-    // Sabotage mode parameters for testing robustness under lossy conditions
-    private static boolean sabotageMode = false;
-    private static double serverDropRate = 0.2;
-    private static int serverDelayMs = 500;
+    /**
+     * --------------------------------------------------------------------
+     * Legacy sabotage mode (server-side) – kept for documentation only.
+     *
+     * This logic is NOT used in the current implementation because all
+     * fault injection is driven from the client. The original design
+     * randomly dropped or delayed outgoing server packets.
+     *
+     * To re-enable in the future, uncomment the fields and the conditional
+     * block inside sendMessage() and call configureSabotageMode() from the
+     * interactive console.
+     *
+     * Example (commented-out reference only):
+     *
+     *    Sabotage mode parameters for testing robustness under lossy conditions
+     *    private static boolean sabotageMode = false;
+     *    private static double serverDropRate = 0.2;
+     *    private static int serverDelayMs = 500;
+     *
+     *    private void sendMessage(Message message) throws IOException {
+     *        if (sabotageMode) {
+     *            if (Math.random() < serverDropRate) {
+     *                System.out.println(Colors.yellow("[SERVER SABOTAGE] Dropped "
+     *                        + message.msgTypeString() + " SeqNum = " + message.getSequenceNum()));
+     *                return;
+     *            }
+     *   
+     *            if (serverDelayMs > 0 && Math.random() < 0.3) {
+     *                try {
+     *                    Thread.sleep(serverDelayMs);
+     *                    System.out.println(Colors.yellow("[SERVER SABOTAGE] Delayed "
+     *                            + message.msgTypeString() + " SeqNum = " + message.getSequenceNum()));
+     *                } catch (InterruptedException e) {
+     *                    Thread.currentThread().interrupt();
+     *                }
+     *            }
+     *        }
+     *   
+     *        byte[] data = message.convertToBytes();
+     *        data = Cryptography.encrypt(data);
+     *        DatagramPacket packet =
+     *                new DatagramPacket(data, data.length, clientAddress, clientPort);
+     *        UDPsocket.send(packet);
+     *    }
+     *
+     *    public static void configureSabotageMode(Scanner scanner) {
+     *       System.out.print("Enable server sabotage mode for testing? (y/n): ");
+     *        String choice = scanner.nextLine().trim().toLowerCase();
+     *   
+     *        if (choice.startsWith("y")) {
+     *            sabotageMode = true;
+     *            System.out.println(Colors.yellow(
+     *                    "[SERVER SABOTAGE] Enabled with 20% drop rate and 500ms delay"));
+     *        }
+     *   }
+     * --------------------------------------------------------------------
+     */
 
     /**
      * Creates a Server bound to the given port.
@@ -79,28 +132,6 @@ public class Server
      */
     private void sendMessage(Message message) throws IOException
     {
-        if(sabotageMode)
-        {
-            if(Math.random() < serverDropRate)
-            {
-                System.out.println(Colors.yellow("[SERVER SABOTAGE] Dropped " + message.msgTypeString() + " SeqNum = " + message.getSequenceNum()));
-                return;
-            }
-
-            if(serverDelayMs > 0 && Math.random() < 0.3)
-            {
-                try
-                {
-                    Thread.sleep(serverDelayMs);
-                    System.out.println(Colors.yellow("[SERVER SABOTAGE] Delayed " + message.msgTypeString() + " SeqNum = " + message.getSequenceNum()));
-                }
-                catch (InterruptedException e)
-                {
-                    Thread.currentThread().interrupt();
-                }
-            }
-        }
-
         byte[] data = message.convertToBytes();
         data = Cryptography.encrypt(data);
         DatagramPacket packet = new DatagramPacket(data, data.length, clientAddress, clientPort);
@@ -566,28 +597,6 @@ public class Server
     {
         if (UDPsocket != null && !UDPsocket.isClosed())
             UDPsocket.close();
-    }
-
-    /**
-     * Optionally enables server-side sabotage mode for testing.
-     *
-     * When the user answers 'y', outgoing packets from the server are randomly
-     * dropped or delayed according to {@code serverDropRate} and
-     * {@code serverDelayMs}. This is used to demonstrate the robustness of the
-     * stop-and-wait protocol under lossy conditions.
-     *
-     * @param scanner interactive console scanner used to read the user's choice
-     */
-    public static void configureSabotageMode(Scanner scanner)
-    {
-        System.out.print("Enable server sabotage mode for testing? (y/n): ");    
-        String choice = scanner.nextLine().trim().toLowerCase();    
-
-        if(choice.startsWith("y"))
-        {
-            sabotageMode = true;
-            System.out.println(Colors.yellow("[SERVER SABOTAGE] Enabled with 20% drop rate and 500ms delay"));
-        }
     }
 
     /**

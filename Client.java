@@ -143,7 +143,7 @@ public class Client
             // sequence blocking
             if(blockSequences && blockedSeqNum != -1 && message.getSequenceNum() == blockedSeqNum)
             {
-                System.out.println(Colors.yellow("[SABOTAGE] Blocked transmission of " + message.msgTypeString() + " SeqNum = " + message.getSequenceNum() + " — retransmissions will be allowed (single packet loss simulation)"));
+                System.out.println(Colors.yellow("[SABOTAGE] Blocked transmission of " + message.msgTypeString() + " SeqNum = " + message.getSequenceNum() + " . Retransmissions will be allowed (single packet loss simulation)"));
                 blockedSeqNum = -1;
                 return;
             }

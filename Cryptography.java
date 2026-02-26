@@ -27,12 +27,10 @@ import java.util.Arrays;
  */
 public class Cryptography
 {
-    // Set to false when you want Wireshark to show raw packet bytes/header fields.
-    // Set back to true for encrypted transport.
     private static final boolean ENCRYPTION_ENABLED = false;
 
-    private static final byte[] SHARED_KEY = "NSCOM01sharedkey".getBytes(); // 16 bytes since AES requires exactly 16, 24, or 32 bytes
-    private static final String ALGORITHM = "AES/CBC/PKCS5Padding"; // AES algorithm with CBC mode and PKCS5 padding
+    private static final byte[] SHARED_KEY = "NSCOM01sharedkey".getBytes(); 
+    private static final String ALGORITHM = "AES/CBC/PKCS5Padding"; 
     private static final int IV_SIZE = 16;
 
     /**
@@ -60,7 +58,6 @@ public class Cryptography
             cipher.init(Cipher.ENCRYPT_MODE, keySpec, ivSpec);
             byte[] ciphertext = cipher.doFinal(data);
 
-            // prepend the IV 
             byte[] result = new byte[IV_SIZE + ciphertext.length];
             System.arraycopy(iv, 0, result, 0, IV_SIZE);
             System.arraycopy(ciphertext, 0, result, IV_SIZE, ciphertext.length);
@@ -93,7 +90,6 @@ public class Cryptography
                 throw new SecurityException("Packet too short for encrypted format.");
             }
 
-            // extract the IV from the first 16 bytes 
             byte[] iv = Arrays.copyOfRange(data, 0, IV_SIZE);
             byte[] ciphertext = Arrays.copyOfRange(data, IV_SIZE, data.length);
 
